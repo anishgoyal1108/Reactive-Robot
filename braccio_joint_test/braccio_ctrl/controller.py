@@ -18,12 +18,13 @@ single-joint or DELTA commands.
 import curses
 import queue
 
-from .arm_state      import ArmState
-from .serial_bridge  import SerialBridge
-from .ik_solver      import solve_ik, polar_to_cartesian
+from .arm_state        import ArmState
+from .serial_bridge    import SerialBridge
+from .ik_solver        import solve_ik, polar_to_cartesian
 from .keyboard_handler import KeyboardHandler
-from .display        import CursesDisplay
-from .protocol       import (
+from .display          import CursesDisplay
+from .state_library    import StateLibrary
+from .protocol         import (
     cmd_set_all, cmd_set_joint, cmd_set_delta, cmd_home, cmd_get_pos,
 )
 from .constants import (
@@ -47,9 +48,11 @@ class BraccioController:
     """
 
     def __init__(self, port: str, baud: int = BAUD_RATE):
-        self._bridge  = SerialBridge(port, baud)
-        self._state   = ArmState()
-        self._plotter = None   # set via attach_plotter() before run()
+        self._bridge    = SerialBridge(port, baud)
+        self._state     = ArmState()
+        self._state_lib = StateLibrary()
+        self._plotter   = None   # set via attach_plotter() before run()
+        self._stdscr    = None   # set inside _curses_main
 
     def attach_plotter(self, plotter) -> None:
         """Attach an ArmPlotter instance before calling run()."""
@@ -64,13 +67,14 @@ class BraccioController:
     # ── curses main ───────────────────────────────────────────────────────
 
     def _curses_main(self, stdscr) -> None:
+        self._stdscr = stdscr
         kb      = KeyboardHandler(stdscr)
         display = CursesDisplay(stdscr)
 
         # Connect to Arduino
         self._connect()
 
-        # Start plotter window (non-blocking — runs in its own thread)
+        # Start plot sampler thread; GUI is pumped on this main thread
         if self._plotter is not None:
             self._plotter.start()
 
@@ -87,6 +91,8 @@ class BraccioController:
                 self._handle_action(action)
 
             display.render(self._state.snapshot())
+            if self._plotter is not None:
+                self._plotter.pump()
 
         self._bridge.close()
         if self._plotter is not None:
@@ -121,11 +127,22 @@ class BraccioController:
                 # Sync position shadow from Arduino
                 self._bridge.send_cmd(cmd_get_pos())
         else:
+            err_msg = self._bridge.connect_error
+            if not err_msg:
+                hint = "pyserial not installed — pip install pyserial"
+            elif 'ermission denied' in err_msg or 'Errno 13' in err_msg:
+                hint = (f"{err_msg} — "
+                        "add user to dialout group: "
+                        "sudo usermod -aG dialout $USER  "
+                        "(Arch: uucp), then log out/in")
+            elif 'busy' in err_msg.lower() or 'Errno 16' in err_msg:
+                hint = f"{err_msg} — close Arduino IDE / other serial monitors"
+            else:
+                hint = err_msg
             with self._state._lock:
                 self._state.connected  = False
                 self._state.last_error = (
-                    f"Cannot open {self._bridge._port} — "
-                    f"{self._bridge.connect_error}"
+                    f"Cannot open {self._bridge._port} — {hint}"
                 )
 
     # ── Response draining ─────────────────────────────────────────────────
@@ -167,6 +184,35 @@ class BraccioController:
         serial command.  IK-affecting actions always send SET ALL.
         Independent axes send targeted single commands.
         """
+        # ── Overlay menus (take over the screen synchronously) ────────────
+        if action == 'states_menu':
+            self._open_states_menu()
+            return
+        if action == 'seq_editor':
+            self._open_seq_editor()
+            return
+        if action == 'plot_main_toggle':
+            if self._plotter is not None:
+                self._plotter.toggle_main()
+            return
+        if action.startswith('plot_joint_') and action.endswith('_toggle'):
+            if self._plotter is not None:
+                idx = int(action[len('plot_joint_')]) - 1
+                self._plotter.toggle_joint(idx)
+            return
+        if action == 'plot_reset':
+            if self._plotter is not None:
+                self._plotter.reset()
+            return
+        if action == 'plot_screenshot':
+            if self._plotter is not None:
+                self._plotter.save_screenshot()
+            return
+        if action == 'plot_log_toggle':
+            if self._plotter is not None:
+                self._plotter.toggle_logging()
+            return
+
         state = self._state
         ik_dirty   = False   # needs full IK recompute + SET ALL
         send_fn    = None    # callable → sends the command after state update
@@ -299,3 +345,55 @@ class BraccioController:
         self._bridge.send_cmd(cmd)
         # Resync joint shadow after home completes
         self._bridge.send_cmd(cmd_get_pos())
+
+    # ── State library helpers ─────────────────────────────────────────────
+
+    def _apply_state(self, state_dict: dict) -> None:
+        """
+        Apply a saved state dict to the arm.
+        Updates both the joint shadow and the IK display state, then sends
+        a SET ALL command.
+        """
+        with self._state._lock:
+            self._state.joints       = list(state_dict['joints'])
+            self._state.theta        = state_dict['theta']
+            self._state.r            = state_dict['r']
+            self._state.z            = state_dict['z']
+            self._state.wrist_offset = state_dict['wrist_offset']
+            self._state.wrist_rot    = state_dict['wrist_rot']
+            self._state.gripper      = state_dict['gripper']
+        cmd = cmd_set_all(state_dict['joints'])
+        with self._state._lock:
+            self._state.last_cmd   = cmd.strip()
+            self._state.last_error = ""
+        self._bridge.send_cmd(cmd)
+
+    def _run_named_state(self, name: str) -> None:
+        """Look up a state by name and apply it.  Called from background thread."""
+        st = self._state_lib.get_state(name)
+        if st:
+            self._apply_state(st)
+
+    def _open_states_menu(self) -> None:
+        """Open the states-management overlay, then restore curses settings."""
+        from .states_menu import run_states_menu
+        result = run_states_menu(
+            self._stdscr,
+            self._state_lib,
+            self._state.snapshot(),
+        )
+        if result:
+            self._apply_state(result)
+        curses.halfdelay(2)
+        curses.curs_set(0)
+
+    def _open_seq_editor(self) -> None:
+        """Open the sequence editor overlay, then restore curses settings."""
+        from .sequence_editor import run_sequence_editor
+        run_sequence_editor(
+            self._stdscr,
+            self._state_lib,
+            self._run_named_state,
+        )
+        curses.halfdelay(2)
+        curses.curs_set(0)

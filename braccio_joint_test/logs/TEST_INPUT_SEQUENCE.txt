@@ -1,0 +1,34 @@
+# META_FULL_DEMO: height + range + rotation + claw + drop + recover
+HOME_REST 500
+STOW_COMPACT 500
+
+# descend and grab
+LOW_APPROACH_OPEN 800
+LOW_GRAB_CLOSE 500
+
+# lift through multiple heights
+LIFT_MID_CARRY 700
+LIFT_HIGH_CARRY 800
+
+# rotate and sweep
+ROTATE_LEFT_SCAN 700
+ROTATE_RIGHT_SCAN 700
+SWEEP_LEFT_WIDE 700
+SWEEP_RIGHT_WIDE 700
+
+# move to drop zones and release
+DROP_HIGH_OPEN 700
+LIFT_MID_CARRY 500
+DROP_LOW_OPEN 700
+
+# claw stress pulse
+CLAW_TEST_OPEN 250
+CLAW_TEST_CLOSE 250
+CLAW_TEST_OPEN 250
+CLAW_TEST_CLOSE 250
+
+# return home
+LIFT_HIGH_CARRY 600
+HOME_REST 700
+
+REPEAT 3

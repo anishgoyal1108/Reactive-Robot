@@ -149,7 +149,10 @@ class CursesDisplay:
             "  I/K: wristV ±5°    J/L: wristR ±5°     O/[ : grip open",
             "  P/] : grip close   +/-: slew rate",
             "  H: go to equil     Shift+H: set equil   ESC: quit",
-            "  [plot window]  R: reset plot   S: screenshot   L: toggle log",
+            "  M: states menu     X: sequence editor",
+            "  0: toggle main plot   1-6: toggle joint plot windows",
+            "  7: reset plot   8: screenshot plot   9: toggle plot log",
+            "  [plot window focus] U: reset   Y: screenshot   T: log",
         ]
         for line in lines:
             if row >= h - 1:
@@ -187,10 +190,21 @@ class CursesDisplay:
             row += 1
 
         if row < h - 1 and state['last_error']:
-            err = f"  ERROR: {state['last_error']}"
-            self._safe_addstr(row, 0, err[:w - 1],
-                              curses.color_pair(_C_ERR) | curses.A_BOLD)
-            row += 1
+            err_attr = curses.color_pair(_C_ERR) | curses.A_BOLD
+            prefix   = "  ERROR: "
+            full     = prefix + state['last_error']
+            if len(full) < w:
+                self._safe_addstr(row, 0, full, err_attr)
+                row += 1
+            else:
+                # First line: as much as fits
+                self._safe_addstr(row, 0, full[:w - 1], err_attr)
+                row += 1
+                # Second line: remainder, indented to align after prefix
+                if row < h - 1:
+                    remainder = "    " + state['last_error'][w - 1 - len(prefix):]
+                    self._safe_addstr(row, 0, remainder[:w - 1], err_attr)
+                    row += 1
 
         return row
 

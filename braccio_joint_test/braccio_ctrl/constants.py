@@ -84,9 +84,12 @@ JOINT_COLORS = [
 PLOT_WINDOW_S  = 60.0   # seconds of history visible at once (scrolling window)
 PLOT_SAMPLE_HZ = 20.0   # sampler thread rate (Hz)
 PLOT_UPDATE_HZ = 10.0   # FuncAnimation redraw rate (Hz)
-PLOT_KEY_RESET      = 'r'   # reset plot & restart t=0
-PLOT_KEY_SCREENSHOT = 's'   # save PNG screenshot
-PLOT_KEY_LOG        = 'l'   # toggle CSV logging
+PLOT_KEY_RESET      = 'u'   # reset plot & restart t=0
+PLOT_KEY_SCREENSHOT = 'y'   # save PNG screenshot
+PLOT_KEY_LOG        = 't'   # toggle CSV logging
+PLOT_KEY_MAIN_TOGGLE = '0'  # hide/show main combined window
+# keys '1'–'6' toggle individual per-joint pop-out windows (hardcoded in plotter)
+PLOT_Y_MARGIN_DEG   = 10    # extra degrees above/below joint limits on y-axis
 LOG_DIR        = 'logs'
 SCREENSHOT_DIR = 'screenshots'
 
@@ -111,6 +114,20 @@ KEY_BINDINGS = {
     ord('-'): 'delta_dec',    ord('_'): 'delta_dec',
     ord('h'): 'go_home',
     ord('H'): 'set_equil',    # Shift+H
+    ord('m'): 'states_menu',  # States menu
+    ord('M'): 'states_menu',
+    ord('x'): 'seq_editor',   # Sequence editor
+    ord('X'): 'seq_editor',
+    ord('0'): 'plot_main_toggle',
+    ord('1'): 'plot_joint_1_toggle',
+    ord('2'): 'plot_joint_2_toggle',
+    ord('3'): 'plot_joint_3_toggle',
+    ord('4'): 'plot_joint_4_toggle',
+    ord('5'): 'plot_joint_5_toggle',
+    ord('6'): 'plot_joint_6_toggle',
+    ord('7'): 'plot_reset',
+    ord('8'): 'plot_screenshot',
+    ord('9'): 'plot_log_toggle',
     27:       'quit',          # ESC
 }
 # fmt: on

@@ -1,0 +1,58 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+*.so
+*.dylib
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Packaging / build
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Tools
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# VS Code / IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# ===== Arduino / Teensy / PlatformIO =====
+# Arduino build artifacts
+*.elf
+*.hex
+*.bin
+*.map
+*.o
+*.a
+*.d
+
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# Teensyduino / Arduino temp files
+*.tmp
+*.bak

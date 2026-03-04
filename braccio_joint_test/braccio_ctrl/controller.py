@@ -13,6 +13,12 @@ The IK path (theta/r/z/wrist changes) recomputes all joint angles on
 every relevant keypress and sends a single SET ALL command.
 Independent axes (wrist rotation, gripper, slew rate) send targeted
 single-joint or DELTA commands.
+
+ToF / IR Integration:
+  - ToF sensors (VL53L5CX × 4) on separate Teensy via tof_sensor.py
+  - IR proximity (OUT1D, 2-bit) for last-resort obstacle detection
+  - Obstacle detected by ToF → replan trajectory
+  - Obstacle detected by IR (ToF missed) → back away immediately
 """
 
 import curses
@@ -24,6 +30,7 @@ from .ik_solver        import solve_ik, polar_to_cartesian
 from .keyboard_handler import KeyboardHandler
 from .display          import CursesDisplay
 from .state_library    import StateLibrary
+from .tof_sensor       import ToFState, ToFBridge, ObstacleResponse
 from .protocol         import (
     cmd_set_all, cmd_set_joint, cmd_set_delta, cmd_home, cmd_get_pos,
 )
@@ -33,7 +40,7 @@ from .constants import (
     DELTA_MIN, DELTA_MAX,
     JOINT_WRIST_ROT, JOINT_GRIPPER,
     R_MIN, R_MAX, Z_MIN, Z_MAX,
-    BAUD_RATE,
+    BAUD_RATE, TOF_NUM_CHANNELS, TOF_BAUD_RATE, TOF_THRESHOLD_MM,
 )
 
 
@@ -43,20 +50,40 @@ class BraccioController:
 
     Parameters
     ----------
-    port : serial port device path, e.g. '/dev/ttyACM0'
-    baud : baud rate (default 115200, must match Arduino sketch)
+    port       : serial port device path for Braccio arm, e.g. '/dev/ttyACM0'
+    baud       : baud rate (default 115200, must match Arduino sketch)
+    teensy_port: serial port for ToF/IR Teensy (None = no ToF)
+    teensy_baud: baud rate for Teensy (default 115200)
     """
 
-    def __init__(self, port: str, baud: int = BAUD_RATE):
+    def __init__(self, port: str, baud: int = BAUD_RATE,
+                 teensy_port: str = None, teensy_baud: int = TOF_BAUD_RATE):
         self._bridge    = SerialBridge(port, baud)
         self._state     = ArmState()
         self._state_lib = StateLibrary()
         self._plotter   = None   # set via attach_plotter() before run()
+        self._tof_plotter = None # set via attach_tof_plotter() before run()
         self._stdscr    = None   # set inside _curses_main
+
+        # ── ToF / IR subsystem ────────────────────────────────────────────
+        self._tof_state  = ToFState(num_channels=TOF_NUM_CHANNELS)
+        self._tof_state.tof_threshold_mm = TOF_THRESHOLD_MM
+        self._tof_bridge = ToFBridge(self._tof_state)
+        self._teensy_port = teensy_port
+        self._teensy_baud = teensy_baud
 
     def attach_plotter(self, plotter) -> None:
         """Attach an ArmPlotter instance before calling run()."""
         self._plotter = plotter
+
+    def attach_tof_plotter(self, tof_plotter) -> None:
+        """Attach a ToFPlotter instance before calling run()."""
+        self._tof_plotter = tof_plotter
+
+    @property
+    def tof_state(self) -> ToFState:
+        """Expose ToF state for external plotter attachment."""
+        return self._tof_state
 
     # ── Entry point ───────────────────────────────────────────────────────
 
@@ -71,16 +98,28 @@ class BraccioController:
         kb      = KeyboardHandler(stdscr)
         display = CursesDisplay(stdscr)
 
-        # Connect to Arduino
+        # Connect to Arduino (Braccio arm)
         self._connect()
+
+        # Connect to Teensy (ToF / IR sensors)
+        if self._teensy_port:
+            ok = self._tof_bridge.connect(self._teensy_port, self._teensy_baud)
+            if not ok:
+                with self._state._lock:
+                    self._state.last_error = (
+                        f"ToF Teensy: cannot open {self._teensy_port}"
+                    )
 
         # Start plot sampler thread; GUI is pumped on this main thread
         if self._plotter is not None:
             self._plotter.start()
+        if self._tof_plotter is not None:
+            self._tof_plotter.start()
 
         # Main loop (~5 Hz, paced by keyboard halfdelay)
         while True:
             self._drain_responses()
+            self._check_obstacle()
 
             action = kb.get_action()
 
@@ -90,13 +129,23 @@ class BraccioController:
             if action is not None:
                 self._handle_action(action)
 
+            # Merge ToF snapshot into arm state for display
+            tof_snap = self._tof_state.snapshot()
+            with self._state._lock:
+                self._state.tof_snapshot = tof_snap
+
             display.render(self._state.snapshot())
             if self._plotter is not None:
                 self._plotter.pump()
+            if self._tof_plotter is not None:
+                self._tof_plotter.pump()
 
         self._bridge.close()
+        self._tof_bridge.close()
         if self._plotter is not None:
             self._plotter.stop()
+        if self._tof_plotter is not None:
+            self._tof_plotter.stop()
 
     # ── Connection ────────────────────────────────────────────────────────
 
@@ -144,6 +193,47 @@ class BraccioController:
                 self._state.last_error = (
                     f"Cannot open {self._bridge._port} — {hint}"
                 )
+
+    # ── Obstacle detection ────────────────────────────────────────────────
+
+    def _check_obstacle(self) -> None:
+        """
+        Check ToF/IR obstacle state and update arm state with warnings.
+
+        Decision logic:
+          ToF  → obstacle within threshold → REPLAN trajectory
+          IR   → obstacle detected (ToF missed!) → BACK AWAY immediately
+
+        The actual trajectory replanning / retreat is signaled through
+        ArmState fields so the display shows the alert and higher-level
+        autonomy code can act on it.
+        """
+        snap = self._tof_state.snapshot()
+        response = snap['obstacle_response']
+        source   = snap['obstacle_source']
+        dist     = snap['obstacle_dist_mm']
+
+        with self._state._lock:
+            self._state.obstacle_response = response
+            self._state.obstacle_source   = source
+            self._state.obstacle_dist_mm  = dist
+
+            if response == ObstacleResponse.BACK_AWAY:
+                self._state.last_error = (
+                    f"IR DANGER — BACK AWAY! (src={source}) "
+                    f"ToF failed to detect, IR is second line of defense"
+                )
+            elif response == ObstacleResponse.REPLAN:
+                self._state.last_error = (
+                    f"ToF: obstacle at {dist:.0f} mm "
+                    f"(threshold={snap['tof_threshold_mm']:.0f} mm, "
+                    f"src={source}) — REPLAN TRAJECTORY"
+                )
+            else:
+                # Clear obstacle-related errors (don't clear other errors)
+                if ('BACK AWAY' in self._state.last_error
+                        or 'REPLAN' in self._state.last_error):
+                    self._state.last_error = ''
 
     # ── Response draining ─────────────────────────────────────────────────
 
@@ -211,6 +301,41 @@ class BraccioController:
         if action == 'plot_log_toggle':
             if self._plotter is not None:
                 self._plotter.toggle_logging()
+            return
+        # ── ToF / IR actions ──────────────────────────────────────────────
+        if action == 'tof_view_toggle':
+            if self._tof_plotter is not None:
+                self._tof_plotter.toggle_main()
+            return
+        if action == 'tof_export_csv':
+            if self._tof_plotter is not None:
+                path = self._tof_plotter.export_csv_snapshot()
+                with self._state._lock:
+                    self._state.last_resp = f"ToF CSV → {path}"
+            return
+        if action == 'tof_screenshot':
+            if self._tof_plotter is not None:
+                self._tof_plotter.save_screenshot()
+            return
+        if action == 'tof_log_toggle':
+            if self._tof_plotter is not None:
+                self._tof_plotter.toggle_logging()
+            return
+        if action == 'tof_threshold_inc':
+            with self._tof_state._lock:
+                self._tof_state.tof_threshold_mm = min(
+                    3000.0, self._tof_state.tof_threshold_mm + 50.0)
+            return
+        if action == 'tof_threshold_dec':
+            with self._tof_state._lock:
+                self._tof_state.tof_threshold_mm = max(
+                    50.0, self._tof_state.tof_threshold_mm - 50.0)
+            return
+        if action in ('tof_ch1_toggle', 'tof_ch2_toggle',
+                       'tof_ch3_toggle', 'tof_ch4_toggle'):
+            if self._tof_plotter is not None:
+                ch = int(action[6]) - 1  # 'tof_ch1_toggle' → 0
+                self._tof_plotter.toggle_channel(ch)
             return
 
         state = self._state

@@ -93,6 +93,20 @@ PLOT_Y_MARGIN_DEG   = 10    # extra degrees above/below joint limits on y-axis
 LOG_DIR        = 'logs'
 SCREENSHOT_DIR = 'screenshots'
 
+# ── ToF sensor settings ──────────────────────────────────────────────────
+TOF_NUM_CHANNELS    = 4        # number of VL53L5CX sensors on MUX
+TOF_DEFAULT_PORT    = '/dev/ttyACM1'   # Teensy port (separate from Braccio)
+TOF_BAUD_RATE       = 115200
+TOF_THRESHOLD_MM    = 300.0    # default obstacle detection threshold (mm)
+TOF_UPSAMPLE_N     = 40       # bilinear upsample resolution for plotting
+TOF_SURFACE_EVERY  = 5        # redraw 3D surface every N frames (performance)
+TOF_PLOT_INTERVAL_MS = 100    # animation timer interval
+TOF_MAX_RANGE_MM   = 3000.0   # max display range for heatmap colorbar
+
+# ── IR sensor settings (OUT1D, 2-bit) ───────────────────────────────────
+# Bits: 00=CLEAR  01=FAR  10=CLOSE  11=DANGER
+IR_LABEL_MAP = {0: 'CLEAR', 1: 'FAR', 2: 'CLOSE', 3: 'DANGER'}
+
 # ── Key bindings: curses key code → action string ─────────────────────────
 # fmt: off
 KEY_BINDINGS = {
@@ -128,6 +142,17 @@ KEY_BINDINGS = {
     ord('7'): 'plot_reset',
     ord('8'): 'plot_screenshot',
     ord('9'): 'plot_log_toggle',
+    # ── ToF / IR sensor controls ─────────────────────────────────────────
+    ord('v'): 'tof_view_toggle',       # V: Toggle ToF 4-channel surface viewer
+    ord('V'): 'tof_view_toggle',
+    ord('b'): 'tof_export_csv',        # B: Export current ToF grids to CSV
+    ord('B'): 'tof_export_csv',
+    ord('n'): 'tof_screenshot',        # N: Screenshot ToF plots
+    ord('N'): 'tof_screenshot',
+    ord('g'): 'tof_log_toggle',        # G: Toggle ToF CSV streaming log
+    ord('G'): 'tof_log_toggle',
+    ord('f'): 'tof_threshold_inc',     # F: Increase ToF threshold +50mm
+    ord('F'): 'tof_threshold_dec',     # Shift+F: Decrease ToF threshold -50mm
     27:       'quit',          # ESC
 }
 # fmt: on

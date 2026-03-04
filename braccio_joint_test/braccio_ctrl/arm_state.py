@@ -63,6 +63,12 @@ class ArmState:
         self.last_resp:  str  = ""
         self.last_error: str  = ""
 
+        # ── ToF / IR obstacle state (updated by controller) ─────────────
+        self.obstacle_response: str   = 'clear'    # 'clear', 'replan', 'back_away'
+        self.obstacle_source:   str   = ''          # 'tof_chN' or 'ir'
+        self.obstacle_dist_mm:  float = -1.0        # closest measured distance
+        self.tof_snapshot:      dict  = {}          # latest ToFState.snapshot()
+
     # ── Mutations ─────────────────────────────────────────────────────────
 
     def update_joints_from_ik(self, ik_result, wrist_offset: float,
@@ -125,4 +131,9 @@ class ArmState:
                 'last_cmd':       self.last_cmd,
                 'last_resp':      self.last_resp,
                 'last_error':     self.last_error,
+                # ToF / IR
+                'obstacle_response': self.obstacle_response,
+                'obstacle_source':   self.obstacle_source,
+                'obstacle_dist_mm':  self.obstacle_dist_mm,
+                'tof_snapshot':      dict(self.tof_snapshot) if self.tof_snapshot else {},
             }

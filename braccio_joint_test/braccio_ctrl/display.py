@@ -32,6 +32,7 @@ Layout
 """
 
 import curses
+import numpy as np
 from .constants import JOINT_LIMITS, JOINT_NAMES
 
 # Color pair indices
@@ -72,6 +73,7 @@ class CursesDisplay:
         row = self._draw_title(row, w)
         row = self._draw_joints(row, w, h, state['joints'])
         row = self._draw_ik_state(row, w, h, state)
+        row = self._draw_tof_status(row, w, h, state)
         row = self._draw_controls(row, w, h)
         row = self._draw_status(row, w, h, state)
 
@@ -138,6 +140,77 @@ class CursesDisplay:
 
         return row + 1
 
+    def _draw_tof_status(self, row: int, w: int, h: int, state: dict) -> int:
+        """Draw ToF sensor / IR proximity / obstacle status section."""
+        if row >= h - 1:
+            return row
+
+        tof = state.get('tof_snapshot', {})
+        if not tof:
+            # No ToF connected — show a one-liner
+            self._safe_addstr(row, 0, "TOF/IR SENSORS",
+                              curses.color_pair(_C_LABEL) | curses.A_UNDERLINE)
+            row += 1
+            if row < h - 1:
+                self._safe_addstr(row, 0, "  (no Teensy connected — use --teensy-port)",
+                                  curses.color_pair(_C_DIM))
+                row += 1
+            return row + 1
+
+        self._safe_addstr(row, 0, "TOF/IR SENSORS",
+                          curses.color_pair(_C_LABEL) | curses.A_UNDERLINE)
+        row += 1
+
+        # Per-channel summary: CH0: 450mm  CH1: 320mm  CH2: --  CH3: 1200mm
+        if row < h - 1:
+            parts = []
+            num_ch = tof.get('num_channels', 4)
+            for ch in range(num_ch):
+                grid = tof['grids'][ch]
+                if np.isnan(grid).all():
+                    parts.append(f"CH{ch}: --")
+                else:
+                    mn = float(np.nanmin(grid))
+                    parts.append(f"CH{ch}: {mn:.0f}mm")
+            line = "  " + "   ".join(parts)
+            self._safe_addstr(row, 0, line[:w - 1], curses.color_pair(_C_DIM))
+            row += 1
+
+        # IR status
+        if row < h - 1:
+            ir_label = tof.get('ir_label', '?')
+            ir_bits  = tof.get('ir_bits', 0)
+            line = f"  IR (OUT1D): {ir_bits:02b} = {ir_label}"
+            attr = curses.color_pair(_C_DIM)
+            if ir_bits >= 2:
+                attr = curses.color_pair(_C_ERR) | curses.A_BOLD
+            elif ir_bits == 1:
+                attr = curses.color_pair(_C_WARN)
+            self._safe_addstr(row, 0, line[:w - 1], attr)
+            row += 1
+
+        # Obstacle response
+        if row < h - 1:
+            obs = state.get('obstacle_response', 'clear')
+            src = state.get('obstacle_source', '')
+            dist = state.get('obstacle_dist_mm', -1)
+            thresh = tof.get('tof_threshold_mm', 300)
+
+            if obs == 'back_away':
+                line = f"  *** OBSTACLE: BACK AWAY (IR, ToF missed!) ***"
+                attr = curses.color_pair(_C_ERR) | curses.A_BOLD | curses.A_BLINK
+            elif obs == 'replan':
+                line = (f"  OBSTACLE: REPLAN ({src}, {dist:.0f}mm "
+                        f"< {thresh:.0f}mm threshold)")
+                attr = curses.color_pair(_C_WARN) | curses.A_BOLD
+            else:
+                line = f"  Obstacle: CLEAR  (threshold: {thresh:.0f}mm)"
+                attr = curses.color_pair(_C_OK)
+            self._safe_addstr(row, 0, line[:w - 1], attr)
+            row += 1
+
+        return row + 1
+
     def _draw_controls(self, row: int, w: int, h: int) -> int:
         if row >= h - 1:
             return row
@@ -152,7 +225,8 @@ class CursesDisplay:
             "  M: states menu     X: sequence editor",
             "  0: toggle main plot   1-6: toggle joint plot windows",
             "  7: reset plot   8: screenshot plot   9: toggle plot log",
-            "  [plot window focus] U: reset   Y: screenshot   T: log",
+            "  V: ToF viewer   B: export CSV   N: ToF screenshot   G: ToF log",
+            "  F/Shift+F: ToF threshold ±50mm",
         ]
         for line in lines:
             if row >= h - 1:

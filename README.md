@@ -1,4 +1,4 @@
-# CSTONE_TESTGROUND
+# ARGOS V1
 
 Two-MCU Braccio control stack with host-side obstacle-aware replanning:
 - **Arduino Mega**: low-level actuator interface + MCU IK (`SET IKP`) + watchdog

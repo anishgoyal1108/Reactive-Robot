@@ -12,3 +12,8 @@ pyparsing==3.3.2
 python-dateutil==2.9.0.post0
 six==1.17.0
 zipp==3.23.0
+
+osqp>=0.6.7
+scipy>=1.11
+pytest>=8.0
+

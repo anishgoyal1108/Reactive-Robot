@@ -1,0 +1,15 @@
+{
+  "urdf": "C:\\Users\\Sebastian\\Documents\\GitHub\\CSTONE_TESTGROUND\\Tinkerkit_model\\tinkerkit.urdf",
+  "sample_count": 30000,
+  "seed": 7,
+  "bounds_min_m": [
+    -0.3006093233630615,
+    -0.29718237109659684,
+    -0.09716686735341937
+  ],
+  "bounds_max_m": [
+    0.3008790769817784,
+    0.30125181681445545,
+    0.3579783284099165
+  ]
+}

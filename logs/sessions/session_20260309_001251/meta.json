@@ -1,0 +1,12 @@
+{
+  "start_wall": 1773029532.4243262,
+  "end_wall": 1773029571.158893,
+  "duration_s": 38.73456692695618,
+  "samples": 969,
+  "tof_channels_enabled": 3,
+  "threshold_mm": 300.0,
+  "obstacle_decay_s": 3.0,
+  "feasible_region_dir": "C:\\Users\\Sebastian\\Documents\\GitHub\\CSTONE_TESTGROUND\\braccio_main_runner\\sensing\\feasible_regions",
+  "feasible_cloud_path": "C:\\Users\\Sebastian\\Documents\\GitHub\\CSTONE_TESTGROUND\\braccio_main_runner\\sensing\\feasible_regions\\workspace_cloud.npy",
+  "urdf_path": "C:\\Users\\Sebastian\\Documents\\GitHub\\CSTONE_TESTGROUND\\Tinkerkit_model\\tinkerkit.urdf"
+}

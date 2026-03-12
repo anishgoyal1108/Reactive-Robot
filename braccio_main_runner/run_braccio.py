@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-run_braccio.py — Standalone launcher (no install needed).
+run_braccio.py - Standalone launcher (no install needed).
 
 Usage:
   python run_braccio.py                   # default port /dev/ttyACM0
@@ -17,3 +17,4 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from braccio_ctrl.__main__ import main
 
 main()
+

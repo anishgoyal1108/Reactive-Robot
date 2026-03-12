@@ -286,5 +286,21 @@
     "wrist_offset": 14.0,
     "wrist_rot": 90,
     "gripper": 73
+  },
+  "\uffff\uffff\uffff\u001b\uffff": {
+    "joints": [
+      95,
+      113,
+      17,
+      65,
+      25,
+      73
+    ],
+    "theta": 95.0,
+    "r": 92.0,
+    "z": 20.0,
+    "wrist_offset": 15.0,
+    "wrist_rot": 25,
+    "gripper": 73
   }
 }

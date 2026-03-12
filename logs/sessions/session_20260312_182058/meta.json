@@ -1,0 +1,33 @@
+{
+  "start_wall": 1773354022.591375,
+  "end_wall": 1773354058.3855731,
+  "duration_s": 35.79419803619385,
+  "samples": 894,
+  "tof_channels_enabled": 2,
+  "threshold_mm": 300.0,
+  "obstacle_decay_s": 3.0,
+  "persistent_memory_active": false,
+  "imu_lpf_alpha": 0.25,
+  "imu_calibrated": true,
+  "imu_calibration_rms_deg": 8.402805934425126,
+  "imu_rot_wrist_from_imu": [
+    [
+      -0.21870952443243083,
+      0.9748060056892174,
+      -0.043810902692978
+    ],
+    [
+      -0.4125618857872944,
+      -0.05168912305201313,
+      0.909461887576244
+    ],
+    [
+      0.8842843628144571,
+      0.2169826855542798,
+      0.4134727075049587
+    ]
+  ],
+  "feasible_region_dir": "C:\\Users\\Sebastian\\Documents\\GitHub\\CSTONE_TESTGROUND\\braccio_main_runner\\sensing\\feasible_regions",
+  "feasible_cloud_path": "C:\\Users\\Sebastian\\Documents\\GitHub\\CSTONE_TESTGROUND\\braccio_main_runner\\sensing\\feasible_regions\\workspace_cloud.npy",
+  "urdf_path": "C:\\Users\\Sebastian\\Documents\\GitHub\\CSTONE_TESTGROUND\\Tinkerkit_model\\tinkerkit.urdf"
+}

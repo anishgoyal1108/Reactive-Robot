@@ -64,8 +64,11 @@ class CursesDisplay:
 
     # ── Public API ────────────────────────────────────────────────────────
 
-    def render(self, state: dict) -> None:
-        """Redraw the full UI from a state snapshot."""
+    def render(self, state: dict, *,
+               imu_snap: dict = None,
+               sweep_snap: dict = None,
+               obs_snap: dict = None) -> None:
+        """Redraw the full UI from a state snapshot plus optional sub-snapshots."""
         self._scr.erase()
         h, w = self._scr.getmaxyx()
         row = 0
@@ -74,6 +77,8 @@ class CursesDisplay:
         row = self._draw_joints(row, w, h, state['joints'])
         row = self._draw_ik_state(row, w, h, state)
         row = self._draw_tof_status(row, w, h, state)
+        row = self._draw_sweep_status(row, w, h, sweep_snap, obs_snap)
+        row = self._draw_imu_status(row, w, h, imu_snap)
         row = self._draw_controls(row, w, h)
         row = self._draw_status(row, w, h, state)
 
@@ -211,6 +216,106 @@ class CursesDisplay:
 
         return row + 1
 
+    def _draw_sweep_status(self, row: int, w: int, h: int,
+                            sweep_snap: dict, obs_snap: dict) -> int:
+        """Draw autonomous sweep state and obstacle map summary."""
+        if row >= h - 1:
+            return row
+
+        self._safe_addstr(row, 0, "SWEEP / OBSTACLE MAP",
+                          curses.color_pair(_C_LABEL) | curses.A_UNDERLINE)
+        row += 1
+
+        if sweep_snap is None:
+            if row < h - 1:
+                self._safe_addstr(row, 0, "  (sweep not initialised)",
+                                  curses.color_pair(_C_DIM))
+                row += 1
+            return row + 1
+
+        # Sweep state line
+        if row < h - 1:
+            state_str = sweep_snap.get('sweep_state', 'idle').upper()
+            theta     = sweep_snap.get('current_theta', 0.0)
+            direction = sweep_snap.get('direction', 1)
+            dir_sym   = '→' if direction > 0 else '←'
+            running   = sweep_snap.get('running', False)
+            bypass    = sweep_snap.get('bypass_theta')
+
+            attr = curses.color_pair(_C_DIM)
+            if state_str == 'RUNNING':
+                attr = curses.color_pair(_C_OK)
+            elif state_str in ('PAUSED_OBSTACLE', 'BACK_AWAY'):
+                attr = curses.color_pair(_C_WARN) | curses.A_BOLD
+
+            line = (f"  SWEEP: {'[ON]' if running else '[OFF]'} "
+                    f"{state_str}  theta={theta:.1f}° {dir_sym}")
+            if bypass is not None:
+                line += f"  bypass→{bypass:.1f}°"
+            self._safe_addstr(row, 0, line[:w - 1], attr)
+            row += 1
+
+        # Obstacle map summary
+        if row < h - 1 and obs_snap is not None:
+            num_pts = obs_snap.get('num_points', 0)
+            est     = obs_snap.get('kalman_estimate')
+            unc     = obs_snap.get('kalman_uncertainty_mm', -1.0)
+            age     = obs_snap.get('last_obs_age_s', 99.0)
+
+            if num_pts > 0:
+                cen = obs_snap.get('centroid')
+                cen_str = (f"[{cen[0]:.0f},{cen[1]:.0f},{cen[2]:.0f}]mm"
+                           if cen else "?")
+                line = f"  OBS MAP: {num_pts} pts  centroid={cen_str}"
+                attr = curses.color_pair(_C_WARN)
+            elif est is not None and age < 2.0:
+                line = (f"  OBS MAP: est=({est[0]:.0f},{est[1]:.0f},"
+                        f"{est[2]:.0f})mm  unc={unc:.0f}mm  age={age:.1f}s")
+                attr = curses.color_pair(_C_DIM)
+            else:
+                line = "  OBS MAP: clear"
+                attr = curses.color_pair(_C_OK)
+            self._safe_addstr(row, 0, line[:w - 1], attr)
+            row += 1
+
+        return row + 1
+
+    def _draw_imu_status(self, row: int, w: int, h: int,
+                          imu_snap: dict) -> int:
+        """Draw IMU orientation and calibration status."""
+        if row >= h - 1:
+            return row
+
+        self._safe_addstr(row, 0, "IMU",
+                          curses.color_pair(_C_LABEL) | curses.A_UNDERLINE)
+        row += 1
+
+        if imu_snap is None:
+            if row < h - 1:
+                self._safe_addstr(row, 0, "  (no IMU data — check Teensy firmware)",
+                                  curses.color_pair(_C_DIM))
+                row += 1
+            return row + 1
+
+        if row < h - 1:
+            cal     = imu_snap.get('calibrated', False)
+            yaw_rel = imu_snap.get('yaw_relative', 0.0)
+            yaw_raw = imu_snap.get('yaw_deg', 0.0)
+            roll    = imu_snap.get('roll_deg', 0.0)
+            pitch   = imu_snap.get('pitch_deg', 0.0)
+            cal_str = f"[calibrated, ref={imu_snap.get('yaw_calibration_offset',0):.1f}°]"
+            if not cal:
+                cal_str = "[uncalibrated — press C to calibrate]"
+
+            line = (f"  roll={roll:+.1f}°  pitch={pitch:+.1f}°  "
+                    f"yaw={yaw_raw:.1f}° (rel={yaw_rel:+.1f}°)  {cal_str}")
+            attr = (curses.color_pair(_C_OK) if cal
+                    else curses.color_pair(_C_WARN))
+            self._safe_addstr(row, 0, line[:w - 1], attr)
+            row += 1
+
+        return row + 1
+
     def _draw_controls(self, row: int, w: int, h: int) -> int:
         if row >= h - 1:
             return row
@@ -227,6 +332,7 @@ class CursesDisplay:
             "  7: reset plot   8: screenshot plot   9: toggle plot log",
             "  V: ToF viewer   B: export CSV   N: ToF screenshot   G: ToF log",
             "  F/Shift+F: ToF threshold ±50mm",
+            "  Z: start/stop sweep   C: IMU calibrate",
         ]
         for line in lines:
             if row >= h - 1:

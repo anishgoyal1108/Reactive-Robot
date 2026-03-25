@@ -31,6 +31,9 @@ from .keyboard_handler import KeyboardHandler
 from .display          import CursesDisplay
 from .state_library    import StateLibrary
 from .tof_sensor       import ToFState, ToFBridge, ObstacleResponse
+from .imu_state        import IMUState
+from .obstacle_map     import ObstacleMap
+from .auto_sweep       import AutoSweeper
 from .protocol         import (
     cmd_set_all, cmd_set_joint, cmd_set_delta, cmd_home, cmd_get_pos,
 )
@@ -68,9 +71,19 @@ class BraccioController:
         # ── ToF / IR subsystem ────────────────────────────────────────────
         self._tof_state  = ToFState(num_channels=TOF_NUM_CHANNELS)
         self._tof_state.tof_threshold_mm = TOF_THRESHOLD_MM
-        self._tof_bridge = ToFBridge(self._tof_state)
+        self._imu_state  = IMUState()
+        self._tof_bridge = ToFBridge(self._tof_state, self._imu_state)
         self._teensy_port = teensy_port
         self._teensy_baud = teensy_baud
+
+        # ── Obstacle map + autonomous sweep ──────────────────────────────
+        self._obstacle_map = ObstacleMap(threshold_mm=TOF_THRESHOLD_MM)
+        self._sweeper = AutoSweeper(
+            arm_state=self._state,
+            bridge=self._bridge,
+            tof_state=self._tof_state,
+            obstacle_map=self._obstacle_map,
+        )
 
     def attach_plotter(self, plotter) -> None:
         """Attach an ArmPlotter instance before calling run()."""
@@ -120,6 +133,7 @@ class BraccioController:
         while True:
             self._drain_responses()
             self._check_obstacle()
+            self._update_obstacle_map()
 
             action = kb.get_action()
 
@@ -129,17 +143,24 @@ class BraccioController:
             if action is not None:
                 self._handle_action(action)
 
-            # Merge ToF snapshot into arm state for display
-            tof_snap = self._tof_state.snapshot()
+            # Merge ToF + IMU + sweep snapshots into arm state for display
+            tof_snap   = self._tof_state.snapshot()
+            imu_snap   = self._imu_state.snapshot()
+            sweep_snap = self._sweeper.get_status()
+            obs_snap   = self._obstacle_map.snapshot()
             with self._state._lock:
                 self._state.tof_snapshot = tof_snap
-
-            display.render(self._state.snapshot())
+            display.render(self._state.snapshot(),
+                           imu_snap=imu_snap,
+                           sweep_snap=sweep_snap,
+                           obs_snap=obs_snap)
             if self._plotter is not None:
                 self._plotter.pump()
             if self._tof_plotter is not None:
                 self._tof_plotter.pump()
 
+        if self._sweeper.is_running():
+            self._sweeper.stop()
         self._bridge.close()
         self._tof_bridge.close()
         if self._plotter is not None:
@@ -234,6 +255,36 @@ class BraccioController:
                 if ('BACK AWAY' in self._state.last_error
                         or 'REPLAN' in self._state.last_error):
                     self._state.last_error = ''
+
+    # ── Obstacle map update ───────────────────────────────────────────────
+
+    def _update_obstacle_map(self) -> None:
+        """Project current ToF grids into world frame and update obstacle map."""
+        tof_snap = self._tof_state.snapshot()
+        arm_snap = self._state.snapshot()
+        imu_snap = self._imu_state.snapshot()
+        imu_R    = self._imu_state.rotation_matrix()
+        self._obstacle_map.update(
+            tof_snap['grids'], arm_snap, imu_snap, imu_R
+        )
+
+    # ── IMU calibration ────────────────────────────────────────────────────
+
+    def _run_imu_calibration(self) -> None:
+        """
+        Record the current IMU yaw as the calibration reference.
+
+        After calibration all yaw values (and therefore world-frame obstacle
+        projections) are expressed relative to this pose.  Call this with the
+        arm at a known orientation (e.g. theta=90, arm pointing forward).
+        """
+        self._imu_state.record_calibration()
+        with self._state._lock:
+            self._state.last_resp = (
+                f"IMU calibrated: yaw_ref="
+                f"{self._imu_state.yaw_calibration_offset:.1f}°"
+            )
+            self._state.last_error = ""
 
     # ── Response draining ─────────────────────────────────────────────────
 
@@ -330,6 +381,21 @@ class BraccioController:
             with self._tof_state._lock:
                 self._tof_state.tof_threshold_mm = max(
                     50.0, self._tof_state.tof_threshold_mm - 50.0)
+            return
+        # ── Autonomous sweep ──────────────────────────────────────────────
+        if action == 'sweep_toggle':
+            if self._sweeper.is_running():
+                self._sweeper.stop()
+                with self._state._lock:
+                    self._state.last_resp = "Sweep stopped"
+            else:
+                self._sweeper.start()
+                with self._state._lock:
+                    self._state.last_resp = "Sweep started"
+            return
+        # ── IMU calibration ───────────────────────────────────────────────
+        if action == 'imu_calibrate':
+            self._run_imu_calibration()
             return
         if action in ('tof_ch1_toggle', 'tof_ch2_toggle',
                        'tof_ch3_toggle', 'tof_ch4_toggle'):

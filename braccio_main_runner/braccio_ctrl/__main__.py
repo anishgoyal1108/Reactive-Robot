@@ -1,8 +1,11 @@
 """
 __main__.py — CLI entry point.
 
-  python -m braccio_ctrl [port] [--baud N] [--list-ports] [--no-plot]
+  python -m braccio_ctrl [port] [--baud N] [--list-ports]
                          [--teensy-port PORT] [--no-tof]
+
+Live matplotlib plots are provided by standalone companion scripts
+(arm_plotter_app.py, tof_plotter_app.py) that receive data over UDP.
 """
 
 import argparse
@@ -10,7 +13,10 @@ import sys
 
 from .serial_bridge import SerialBridge
 from .controller    import BraccioController
-from .constants     import DEFAULT_PORT, BAUD_RATE, TOF_DEFAULT_PORT, TOF_BAUD_RATE
+from .constants     import (
+    DEFAULT_PORT, BAUD_RATE, TOF_DEFAULT_PORT, TOF_BAUD_RATE,
+    ARM_DATA_PORT, TOF_DATA_PORT,
+)
 
 
 def main() -> None:
@@ -35,11 +41,6 @@ def main() -> None:
         action='store_true',
         help='List available serial ports and exit',
     )
-    parser.add_argument(
-        '--no-plot',
-        action='store_true',
-        help='Disable the real-time joint angle plotter window',
-    )
     # ── ToF / IR sensor arguments ────────────────────────────────────────
     parser.add_argument(
         '--teensy-port',
@@ -57,11 +58,6 @@ def main() -> None:
         '--no-tof',
         action='store_true',
         help='Disable ToF/IR sensors entirely',
-    )
-    parser.add_argument(
-        '--no-tof-plot',
-        action='store_true',
-        help='Connect ToF sensors but disable the ToF plotter window',
     )
     args = parser.parse_args()
 
@@ -88,6 +84,8 @@ def main() -> None:
         print(f"Connecting to ToF/IR Teensy on {teensy_port} at {args.teensy_baud} baud...")
     else:
         print("ToF/IR sensors: disabled (pass --teensy-port to enable)")
+    print(f"Streaming data → UDP localhost:{ARM_DATA_PORT} (arm), "
+          f":{TOF_DATA_PORT} (tof)")
     print("Press ESC to quit.\n")
 
     ctrl = BraccioController(
@@ -95,14 +93,6 @@ def main() -> None:
         teensy_port=teensy_port,
         teensy_baud=args.teensy_baud,
     )
-
-    if not args.no_plot:
-        from .plotter import ArmPlotter
-        ctrl.attach_plotter(ArmPlotter(ctrl._state))
-
-    if teensy_port and not args.no_tof_plot:
-        from .tof_plotter import ToFPlotter
-        ctrl.attach_tof_plotter(ToFPlotter(ctrl.tof_state))
 
     try:
         ctrl.run()

@@ -3,7 +3,7 @@ obstacle_map.py — World-frame obstacle point cloud with Kalman tracking.
 
 Responsibilities
 ----------------
-1. Project each VL53L5CX 8×8 ToF grid cell into the inertial (world) frame,
+1. Project each VL53L5CX ToF grid cell (4×4 or 8×8) into the inertial (world) frame,
    using the arm's current polar pose (theta, r, z) and IMU orientation.
 2. Maintain a rolling cloud of obstacle points (age-capped, per-channel).
 3. Run a 6-DOF constant-velocity Kalman filter on the obstacle centroid so
@@ -35,7 +35,6 @@ import numpy as np
 from .constants import (
     OBS_MAP_MAX_AGE_S,
     OBS_MAP_TOF_FOV_DEG,
-    OBS_MAP_GRID_SIZE,
     SENSOR_MOUNT_FRONT_OFFSET,
     SENSOR_MOUNT_BACK_OFFSET,
     SENSOR_MOUNT_TOP_OFFSET,
@@ -171,7 +170,7 @@ class ObstacleMap:
 
         Parameters
         ----------
-        tof_grids  : list of 4 np.ndarray (8×8, mm), from ToFState.snapshot()
+        tof_grids  : list of 4 np.ndarray (4×4 or 8×8, mm), from ToFState.snapshot()
         arm_snap   : dict from ArmState.snapshot() — needs 'theta', 'r', 'z'
         imu_snap   : dict from IMUState.snapshot()
         imu_R      : optional pre-computed 3×3 rotation matrix (saves recompute)
@@ -346,27 +345,27 @@ class ObstacleMap:
                       R_base: np.ndarray,
                       R_imu: np.ndarray) -> Optional[np.ndarray]:
         """
-        Project one 8×8 ToF grid into world-frame XYZ points.
+        Project one ToF grid (4×4 or 8×8) into world-frame XYZ points.
 
         Only cells closer than self._threshold are included (i.e., they
         represent real obstacles, not background).
 
         Returns (N, 3) array or None if no obstacle pixels.
         """
-        n = OBS_MAP_GRID_SIZE
+        rows, cols = grid.shape
         half_fov = math.radians(OBS_MAP_TOF_FOV_DEG / 2.0)
 
         world_pts = []
-        for row in range(n):
-            for col in range(n):
+        for row in range(rows):
+            for col in range(cols):
                 d = float(grid[row, col])
                 if math.isnan(d) or d <= 0 or d >= self._threshold:
                     continue
 
                 # Bearing angles in sensor frame
                 # Centre of FOV is boresight; grid runs from -FOV/2 to +FOV/2
-                h_ang = ((col - (n - 1) / 2.0) / ((n - 1) / 2.0)) * half_fov
-                v_ang = ((row - (n - 1) / 2.0) / ((n - 1) / 2.0)) * half_fov
+                h_ang = ((col - (cols - 1) / 2.0) / ((cols - 1) / 2.0)) * half_fov
+                v_ang = ((row - (rows - 1) / 2.0) / ((rows - 1) / 2.0)) * half_fov
 
                 # Point in sensor frame (sensor +X = boresight)
                 ps = np.array([

@@ -34,6 +34,7 @@ from .tof_sensor       import ToFState, ToFBridge, ObstacleResponse
 from .imu_state        import IMUState
 from .obstacle_map     import ObstacleMap
 from .auto_sweep       import AutoSweeper
+from .data_publisher   import DataPublisher
 from .protocol         import (
     cmd_set_all, cmd_set_joint, cmd_set_delta, cmd_home, cmd_get_pos,
 )
@@ -64,8 +65,7 @@ class BraccioController:
         self._bridge    = SerialBridge(port, baud)
         self._state     = ArmState()
         self._state_lib = StateLibrary()
-        self._plotter   = None   # set via attach_plotter() before run()
-        self._tof_plotter = None # set via attach_tof_plotter() before run()
+        self._publisher = DataPublisher()
         self._stdscr    = None   # set inside _curses_main
 
         # ── ToF / IR subsystem ────────────────────────────────────────────
@@ -84,19 +84,6 @@ class BraccioController:
             tof_state=self._tof_state,
             obstacle_map=self._obstacle_map,
         )
-
-    def attach_plotter(self, plotter) -> None:
-        """Attach an ArmPlotter instance before calling run()."""
-        self._plotter = plotter
-
-    def attach_tof_plotter(self, tof_plotter) -> None:
-        """Attach a ToFPlotter instance before calling run()."""
-        self._tof_plotter = tof_plotter
-
-    @property
-    def tof_state(self) -> ToFState:
-        """Expose ToF state for external plotter attachment."""
-        return self._tof_state
 
     # ── Entry point ───────────────────────────────────────────────────────
 
@@ -123,12 +110,6 @@ class BraccioController:
                         f"ToF Teensy: cannot open {self._teensy_port}"
                     )
 
-        # Start plot sampler thread; GUI is pumped on this main thread
-        if self._plotter is not None:
-            self._plotter.start()
-        if self._tof_plotter is not None:
-            self._tof_plotter.start()
-
         # Main loop (~5 Hz, paced by keyboard halfdelay)
         while True:
             self._drain_responses()
@@ -150,23 +131,22 @@ class BraccioController:
             obs_snap   = self._obstacle_map.snapshot()
             with self._state._lock:
                 self._state.tof_snapshot = tof_snap
-            display.render(self._state.snapshot(),
+
+            arm_snap = self._state.snapshot()
+            display.render(arm_snap,
                            imu_snap=imu_snap,
                            sweep_snap=sweep_snap,
                            obs_snap=obs_snap)
-            if self._plotter is not None:
-                self._plotter.pump()
-            if self._tof_plotter is not None:
-                self._tof_plotter.pump()
+
+            # Stream data to standalone plotter apps (fire-and-forget UDP)
+            self._publisher.send_arm(arm_snap)
+            self._publisher.send_tof(tof_snap)
 
         if self._sweeper.is_running():
             self._sweeper.stop()
         self._bridge.close()
         self._tof_bridge.close()
-        if self._plotter is not None:
-            self._plotter.stop()
-        if self._tof_plotter is not None:
-            self._tof_plotter.stop()
+        self._publisher.close()
 
     # ── Connection ────────────────────────────────────────────────────────
 
@@ -332,46 +312,6 @@ class BraccioController:
         if action == 'seq_editor':
             self._open_seq_editor()
             return
-        if action == 'plot_main_toggle':
-            if self._plotter is not None:
-                self._plotter.toggle_main()
-            return
-        if action.startswith('plot_joint_') and action.endswith('_toggle'):
-            if self._plotter is not None:
-                idx = int(action[len('plot_joint_')]) - 1
-                self._plotter.toggle_joint(idx)
-            return
-        if action == 'plot_reset':
-            if self._plotter is not None:
-                self._plotter.reset()
-            return
-        if action == 'plot_screenshot':
-            if self._plotter is not None:
-                self._plotter.save_screenshot()
-            return
-        if action == 'plot_log_toggle':
-            if self._plotter is not None:
-                self._plotter.toggle_logging()
-            return
-        # ── ToF / IR actions ──────────────────────────────────────────────
-        if action == 'tof_view_toggle':
-            if self._tof_plotter is not None:
-                self._tof_plotter.toggle_main()
-            return
-        if action == 'tof_export_csv':
-            if self._tof_plotter is not None:
-                path = self._tof_plotter.export_csv_snapshot()
-                with self._state._lock:
-                    self._state.last_resp = f"ToF CSV → {path}"
-            return
-        if action == 'tof_screenshot':
-            if self._tof_plotter is not None:
-                self._tof_plotter.save_screenshot()
-            return
-        if action == 'tof_log_toggle':
-            if self._tof_plotter is not None:
-                self._tof_plotter.toggle_logging()
-            return
         if action == 'tof_threshold_inc':
             with self._tof_state._lock:
                 self._tof_state.tof_threshold_mm = min(
@@ -396,12 +336,6 @@ class BraccioController:
         # ── IMU calibration ───────────────────────────────────────────────
         if action == 'imu_calibrate':
             self._run_imu_calibration()
-            return
-        if action in ('tof_ch1_toggle', 'tof_ch2_toggle',
-                       'tof_ch3_toggle', 'tof_ch4_toggle'):
-            if self._tof_plotter is not None:
-                ch = int(action[6]) - 1  # 'tof_ch1_toggle' → 0
-                self._tof_plotter.toggle_channel(ch)
             return
 
         state = self._state

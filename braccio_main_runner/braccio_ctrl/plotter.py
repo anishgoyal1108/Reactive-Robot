@@ -239,10 +239,11 @@ class ArmPlotter:
         may defer failure until figure/canvas creation.
         """
         matplotlib = importlib.import_module('matplotlib')
-        # Prefer Tk first for faster startup and fewer Qt focus issues in TUI apps.
+        # Qt backends are safe to create from a non-main thread (unlike TkAgg,
+        # whose C layer enforces Tcl thread affinity and crashes on Python 3.14).
         candidates = (
-            ('tkagg', 'matplotlib.backends.backend_tkagg'),
             ('qtagg', 'matplotlib.backends.backend_qtagg'),
+            ('tkagg', 'matplotlib.backends.backend_tkagg'),
         )
         errors = []
         for backend_name, backend_module in candidates:
@@ -302,6 +303,10 @@ class ArmPlotter:
     def _ui_loop(self) -> None:
         """Dedicated UI thread: owns matplotlib event processing."""
         self._ui_thread_id = threading.get_ident()
+        # Python 3.14 / matplotlib 3.10: the GUI thread check compares against
+        # threading.main_thread().  Redirect that to this thread so the check
+        # passes when matplotlib creates the figure and calls plt.show().
+        threading.main_thread = threading.current_thread
         self._init_ui(show_main=False)
         while not self._stop_event.is_set():
             self._drain_ui_commands()

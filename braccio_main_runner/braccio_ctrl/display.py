@@ -328,9 +328,6 @@ class CursesDisplay:
             "  P/] : grip close   +/-: slew rate",
             "  H: go to equil     Shift+H: set equil   ESC: quit",
             "  M: states menu     X: sequence editor",
-            "  0: toggle main plot   1-6: toggle joint plot windows",
-            "  7: reset plot   8: screenshot plot   9: toggle plot log",
-            "  V: ToF viewer   B: export CSV   N: ToF screenshot   G: ToF log",
             "  F/Shift+F: ToF threshold ±50mm",
             "  Z: start/stop sweep   C: IMU calibrate",
         ]

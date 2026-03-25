@@ -93,6 +93,10 @@ PLOT_Y_MARGIN_DEG   = 10    # extra degrees above/below joint limits on y-axis
 LOG_DIR        = 'logs'
 SCREENSHOT_DIR = 'screenshots'
 
+# ── Data streaming (UDP to standalone plotter apps) ──────────────────────
+ARM_DATA_PORT  = 9870      # joint-angle packets → arm_plotter_app.py
+TOF_DATA_PORT  = 9871      # ToF/IR packets      → tof_plotter_app.py
+
 # ── ToF sensor settings ──────────────────────────────────────────────────
 TOF_NUM_CHANNELS    = 4        # number of VL53L5CX sensors on MUX
 TOF_DEFAULT_PORT    = '/dev/ttyACM1'   # Teensy port (separate from Braccio)
@@ -160,28 +164,9 @@ KEY_BINDINGS = {
     ord('M'): 'states_menu',
     ord('x'): 'seq_editor',   # Sequence editor
     ord('X'): 'seq_editor',
-    ord('0'): 'plot_main_toggle',
-    ord('1'): 'plot_joint_1_toggle',
-    ord('2'): 'plot_joint_2_toggle',
-    ord('3'): 'plot_joint_3_toggle',
-    ord('4'): 'plot_joint_4_toggle',
-    ord('5'): 'plot_joint_5_toggle',
-    ord('6'): 'plot_joint_6_toggle',
-    ord('7'): 'plot_reset',
-    ord('8'): 'plot_screenshot',
-    ord('9'): 'plot_log_toggle',
-    # ── ToF / IR sensor controls ─────────────────────────────────────────
-    ord('v'): 'tof_view_toggle',       # V: Toggle ToF 4-channel surface viewer
-    ord('V'): 'tof_view_toggle',
-    ord('b'): 'tof_export_csv',        # B: Export current ToF grids to CSV
-    ord('B'): 'tof_export_csv',
-    ord('n'): 'tof_screenshot',        # N: Screenshot ToF plots
-    ord('N'): 'tof_screenshot',
-    ord('g'): 'tof_log_toggle',        # G: Toggle ToF CSV streaming log
-    ord('G'): 'tof_log_toggle',
+    # ── ToF / sweep / IMU controls ───────────────────────────────────────
     ord('f'): 'tof_threshold_inc',     # F: Increase ToF threshold +50mm
     ord('F'): 'tof_threshold_dec',     # Shift+F: Decrease ToF threshold -50mm
-    # ── Sweep / IMU controls ──────────────────────────────────────────────
     ord('z'): 'sweep_toggle',          # Z: Start/stop autonomous theta sweep
     ord('Z'): 'sweep_toggle',
     ord('c'): 'imu_calibrate',         # C: Record IMU calibration at current pose

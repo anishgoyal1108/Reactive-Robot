@@ -107,6 +107,34 @@ TOF_MAX_RANGE_MM   = 3000.0   # max display range for heatmap colorbar
 # Bits: 00=CLEAR  01=FAR  10=CLOSE  11=DANGER
 IR_LABEL_MAP = {0: 'CLEAR', 1: 'FAR', 2: 'CLOSE', 3: 'DANGER'}
 
+# ── Autonomous sweep config ───────────────────────────────────────────────
+SWEEP_THETA_MIN            = 0.0      # degrees
+SWEEP_THETA_MAX            = 180.0    # degrees
+SWEEP_R_DEFAULT            = 152.0    # mm  (same as DEFAULT_R)
+SWEEP_Z_DEFAULT            = -50.0   # mm  (same as DEFAULT_Z)
+SWEEP_STEP_DEG             = 2.0     # degrees advanced per tick
+SWEEP_TICK_HZ              = 10.0    # loop rate of the sweep thread (Hz)
+SWEEP_DELTA_NORMAL         = 2       # SET DELTA during normal sweep
+SWEEP_DELTA_REPLAN         = 4       # SET DELTA during replanning (smoother)
+SWEEP_BACK_STEPS           = 2       # steps to retreat on BACK_AWAY
+SWEEP_OBSTACLE_MARGIN_DEG  = 10.0    # safety margin beyond obstacle edge (deg)
+
+# ── Obstacle map config ───────────────────────────────────────────────────
+OBS_MAP_MAX_AGE_S          = 2.0     # seconds before stale cloud points are discarded
+OBS_MAP_TOF_FOV_DEG        = 45.0    # VL53L5CX full horizontal/vertical FoV
+OBS_MAP_GRID_SIZE          = 8       # 8×8 sensor grid
+
+# Sensor mount offsets from end-effector, in mm [x, y, z]
+# Tune these values to match the physical sensor positions on the arm
+SENSOR_MOUNT_FRONT_OFFSET  = [60.0,  0.0,  0.0]
+SENSOR_MOUNT_BACK_OFFSET   = [-60.0, 0.0,  0.0]
+SENSOR_MOUNT_TOP_OFFSET    = [0.0,   0.0,  30.0]
+SENSOR_MOUNT_BOTTOM_OFFSET = [0.0,   0.0, -30.0]
+
+# Channels with primary detection authority (trigger REPLAN)
+# CH0 = front, CH1 = back; CH2/CH3 are top/bottom (confirmation only)
+SENSOR_PRIMARY_CHANNELS    = [0, 1]
+
 # ── Key bindings: curses key code → action string ─────────────────────────
 # fmt: off
 KEY_BINDINGS = {
@@ -153,6 +181,11 @@ KEY_BINDINGS = {
     ord('G'): 'tof_log_toggle',
     ord('f'): 'tof_threshold_inc',     # F: Increase ToF threshold +50mm
     ord('F'): 'tof_threshold_dec',     # Shift+F: Decrease ToF threshold -50mm
+    # ── Sweep / IMU controls ──────────────────────────────────────────────
+    ord('z'): 'sweep_toggle',          # Z: Start/stop autonomous theta sweep
+    ord('Z'): 'sweep_toggle',
+    ord('c'): 'imu_calibrate',         # C: Record IMU calibration at current pose
+    ord('C'): 'imu_calibrate',
     27:       'quit',          # ESC
 }
 # fmt: on

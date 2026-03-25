@@ -29,6 +29,8 @@ from collections import deque
 
 import numpy as np
 
+from .imu_state import IMUState
+
 try:
     import serial
     from serial.tools import list_ports as _list_ports
@@ -191,14 +193,15 @@ class ToFBridge:
     """
     Serial bridge to the Teensy running VL5 ToF + IR firmware.
 
-    A daemon reader thread drains serial data and updates ToFState.
+    A daemon reader thread drains serial data and updates ToFState and IMUState.
     Supports sending mode commands (MUX, CH0–CH3).
     """
 
-    def __init__(self, state: ToFState):
-        self._state     = state
-        self._ser       = None
-        self._stop      = threading.Event()
+    def __init__(self, state: ToFState, imu_state: IMUState = None):
+        self._state      = state
+        self._imu_state  = imu_state if imu_state is not None else IMUState()
+        self._ser        = None
+        self._stop       = threading.Event()
         self._write_lock = threading.Lock()
         self._reader     = None
 
@@ -289,6 +292,11 @@ class ToFBridge:
                         s.mode = raw.split(',', 1)[1].strip()
                     continue
 
+                # ── IMU line ───────────────────────────────────────────────
+                if raw.startswith('IMU,'):
+                    self._parse_imu(raw)
+                    continue
+
             except Exception:
                 if self._stop.is_set():
                     break
@@ -356,5 +364,29 @@ class ToFBridge:
                 s.ir_last_rx = time.time()
 
             s.update_obstacle_status()
+        except Exception:
+            pass
+
+    def _parse_imu(self, line: str):
+        """
+        Parse: IMU,roll,pitch,yaw,ax,ay,az,mx,my,mz
+
+        All angle values in degrees; acceleration in m/s²;
+        magnetometer in device units (uT).
+        """
+        parts = line.split(',')
+        if len(parts) < 10:
+            return
+        try:
+            roll  = float(parts[1])
+            pitch = float(parts[2])
+            yaw   = float(parts[3])
+            ax    = float(parts[4])
+            ay    = float(parts[5])
+            az    = float(parts[6])
+            mx    = float(parts[7])
+            my    = float(parts[8])
+            mz    = float(parts[9])
+            self._imu_state.update(roll, pitch, yaw, ax, ay, az, mx, my, mz)
         except Exception:
             pass

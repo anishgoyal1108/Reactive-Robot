@@ -26,7 +26,7 @@ import queue
 
 from .arm_state        import ArmState
 from .serial_bridge    import SerialBridge
-from .ik_solver        import solve_ik, polar_to_cartesian
+from .ik_solver        import solve_ik, polar_to_cartesian, fk_polar
 from .keyboard_handler import KeyboardHandler
 from .display          import CursesDisplay
 from .state_library    import StateLibrary
@@ -308,9 +308,17 @@ class BraccioController:
             rtype = resp.get('type', 'unknown')
             with self._state._lock:
                 if rtype == 'pos':
-                    # Sync joint shadow from Arduino's actual commanded angles
-                    self._state.joints = list(resp['positions'])
-                    self._state.last_resp = "POS synced"
+                    # Sync joints AND IK polar state from Arduino's actual angles.
+                    # Without this, the first keypress after startup computes IK
+                    # from the stale software default (r=152, z=-50) rather than
+                    # the arm's real position, causing a violent unexpected move.
+                    positions = list(resp['positions'])
+                    theta, r, z = fk_polar(positions)
+                    self._state.joints = positions
+                    self._state.theta  = theta
+                    self._state.r      = r
+                    self._state.z      = z
+                    self._state.last_resp  = "POS synced"
                     self._state.last_error = ""
                 elif rtype == 'error':
                     self._state.last_error = resp.get('message', '')

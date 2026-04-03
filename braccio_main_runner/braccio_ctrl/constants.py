@@ -97,7 +97,10 @@ SCREENSHOT_DIR = 'screenshots'
 TOF_NUM_CHANNELS    = 4        # number of VL53L5CX sensors on MUX
 TOF_DEFAULT_PORT    = '/dev/ttyACM1'   # Teensy port (separate from Braccio)
 TOF_BAUD_RATE       = 115200
-TOF_THRESHOLD_MM    = 300.0    # default obstacle detection threshold (mm)
+# Per-channel obstacle detection thresholds [CH0, CH1, CH2, CH3] (mm)
+# CH0 (front/side) and CH1 (back/side) are primary authority sensors.
+# CH2 (top) and CH3 (bottom) use a tighter threshold but have lower authority.
+TOF_THRESHOLDS_MM   = [250.0, 250.0, 50.0, 50.0]
 TOF_UPSAMPLE_N     = 40       # bilinear upsample resolution for plotting
 TOF_SURFACE_EVERY  = 5        # redraw 3D surface every N frames (performance)
 TOF_PLOT_INTERVAL_MS = 100    # animation timer interval
@@ -111,13 +114,16 @@ IR_LABEL_MAP = {0: 'CLEAR', 1: 'FAR', 2: 'CLOSE', 3: 'DANGER'}
 SWEEP_THETA_MIN            = 0.0      # degrees
 SWEEP_THETA_MAX            = 180.0    # degrees
 SWEEP_R_DEFAULT            = 152.0    # mm  (same as DEFAULT_R)
-SWEEP_Z_DEFAULT            = -50.0   # mm  (same as DEFAULT_Z)
+SWEEP_Z_DEFAULT            = 60.0    # mm above shoulder — high enough to clear table
 SWEEP_STEP_DEG             = 2.0     # degrees advanced per tick
 SWEEP_TICK_HZ              = 10.0    # loop rate of the sweep thread (Hz)
 SWEEP_DELTA_NORMAL         = 2       # SET DELTA during normal sweep
 SWEEP_DELTA_REPLAN         = 4       # SET DELTA during replanning (smoother)
 SWEEP_BACK_STEPS           = 2       # steps to retreat on BACK_AWAY
 SWEEP_OBSTACLE_MARGIN_DEG  = 10.0    # safety margin beyond obstacle edge (deg)
+# Discrete Z levels (mm) tried during Z-axis replanning, derived from saved states.
+# AutoSweeper searches above current Z first (go over), then below (go under).
+SWEEP_Z_CANDIDATES         = [0.0, 20.0, 55.0, 70.0, 95.0]
 
 # ── Obstacle map config ───────────────────────────────────────────────────
 OBS_MAP_MAX_AGE_S          = 2.0     # seconds before stale cloud points are discarded
@@ -131,9 +137,17 @@ SENSOR_MOUNT_BACK_OFFSET   = [-60.0, 0.0,  0.0]
 SENSOR_MOUNT_TOP_OFFSET    = [0.0,   0.0,  30.0]
 SENSOR_MOUNT_BOTTOM_OFFSET = [0.0,   0.0, -30.0]
 
-# Channels with primary detection authority (trigger REPLAN)
-# CH0 = front, CH1 = back; CH2/CH3 are top/bottom (confirmation only)
-SENSOR_PRIMARY_CHANNELS    = [0, 1]
+# Sensor channel authority classification
+# CH0 (front/side) and CH1 (back/side): trigger REPLAN — primary authority
+SENSOR_REPLAN_CHANNELS   = [0, 1]
+# CH2 (top): advisory only — fires below its own threshold but does not trigger REPLAN
+SENSOR_ADVISORY_CHANNELS = [2]
+# CH3 (bottom): ignored — very close to ground, assume sufficient clearance
+SENSOR_IGNORE_CHANNELS   = [3]
+
+# Pre-command end-effector safety sphere radius (mm).
+# A planned move is blocked if any obstacle cloud point is closer than this.
+COLLISION_CHECK_RADIUS_MM = 80.0
 
 # ── Key bindings: curses key code → action string ─────────────────────────
 # fmt: off

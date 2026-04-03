@@ -40,8 +40,9 @@ from .constants import (
     SENSOR_MOUNT_BACK_OFFSET,
     SENSOR_MOUNT_TOP_OFFSET,
     SENSOR_MOUNT_BOTTOM_OFFSET,
-    SENSOR_PRIMARY_CHANNELS,
-    TOF_THRESHOLD_MM,
+    SENSOR_REPLAN_CHANNELS,
+    SENSOR_IGNORE_CHANNELS,
+    TOF_THRESHOLDS_MM,
     SWEEP_OBSTACLE_MARGIN_DEG,
     L1, L2, L3,
 )
@@ -152,12 +153,12 @@ class ObstacleMap:
     Thread-safe: all public methods acquire self._lock.
     """
 
-    def __init__(self, threshold_mm: float = TOF_THRESHOLD_MM,
+    def __init__(self, thresholds_mm: list = None,
                  max_age_s: float = OBS_MAP_MAX_AGE_S):
         self._lock        = threading.RLock()
         self._clouds: List[ObstacleCloud] = []
         self._tracker     = KalmanTracker()
-        self._threshold   = threshold_mm
+        self._thresholds  = list(thresholds_mm or TOF_THRESHOLDS_MM)
         self._max_age_s   = max_age_s
         self._last_obs_t  = 0.0          # time of most recent valid observation
         self._tracker_last_update = 0.0  # epoch time of last Kalman update
@@ -200,12 +201,16 @@ class ObstacleMap:
         new_clouds: List[ObstacleCloud] = []
 
         for ch, grid in enumerate(tof_grids):
+            if ch in SENSOR_IGNORE_CHANNELS:       # CH3 (bottom): skip entirely
+                continue
             if grid is None or np.isnan(grid).all():
                 continue
 
             mount_offset, R_sensor_to_ee = _SENSOR_CONFIGS[ch]
+            ch_threshold = self._thresholds[ch] if ch < len(self._thresholds) else self._thresholds[0]
             pts_world = self._project_grid(
-                grid, mount_offset, R_sensor_to_ee, ee_pos, R_base, R_imu
+                grid, mount_offset, R_sensor_to_ee, ee_pos, R_base, R_imu,
+                threshold=ch_threshold
             )
 
             if pts_world is not None and len(pts_world) > 0:
@@ -224,9 +229,9 @@ class ObstacleMap:
             self._clouds.extend(new_clouds)
 
             # Feed Kalman filter with the most authoritative centroid
-            # (prefer primary channels CH0/CH1 over confirmation channels)
+            # (prefer REPLAN channels CH0/CH1 over advisory channels CH2)
             primary_clouds = [c for c in new_clouds
-                              if c.source_ch in SENSOR_PRIMARY_CHANNELS]
+                              if c.source_ch in SENSOR_REPLAN_CHANNELS]
             all_new = primary_clouds if primary_clouds else new_clouds
 
             if all_new:
@@ -344,15 +349,19 @@ class ObstacleMap:
                       R_s2ee: np.ndarray,
                       ee_pos: np.ndarray,
                       R_base: np.ndarray,
-                      R_imu: np.ndarray) -> Optional[np.ndarray]:
+                      R_imu: np.ndarray,
+                      threshold: float = None) -> Optional[np.ndarray]:
         """
         Project one 8×8 ToF grid into world-frame XYZ points.
 
-        Only cells closer than self._threshold are included (i.e., they
-        represent real obstacles, not background).
+        Only cells closer than `threshold` are included (i.e., they represent
+        real obstacles, not background).  Defaults to the first channel's
+        threshold if not specified.
 
         Returns (N, 3) array or None if no obstacle pixels.
         """
+        if threshold is None:
+            threshold = self._thresholds[0]
         n = OBS_MAP_GRID_SIZE
         half_fov = math.radians(OBS_MAP_TOF_FOV_DEG / 2.0)
 
@@ -360,7 +369,7 @@ class ObstacleMap:
         for row in range(n):
             for col in range(n):
                 d = float(grid[row, col])
-                if math.isnan(d) or d <= 0 or d >= self._threshold:
+                if math.isnan(d) or d <= 0 or d >= threshold:
                     continue
 
                 # Bearing angles in sensor frame

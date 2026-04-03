@@ -43,7 +43,8 @@ from .constants import (
     DELTA_MIN, DELTA_MAX,
     JOINT_WRIST_ROT, JOINT_GRIPPER,
     R_MIN, R_MAX, Z_MIN, Z_MAX,
-    BAUD_RATE, TOF_NUM_CHANNELS, TOF_BAUD_RATE, TOF_THRESHOLD_MM,
+    BAUD_RATE, TOF_NUM_CHANNELS, TOF_BAUD_RATE, TOF_THRESHOLDS_MM,
+    SENSOR_IGNORE_CHANNELS,
 )
 
 
@@ -77,7 +78,7 @@ class BraccioController:
         self._teensy_baud = teensy_baud
 
         # ── Obstacle map + autonomous sweep ──────────────────────────────
-        self._obstacle_map = ObstacleMap(threshold_mm=TOF_THRESHOLD_MM)
+        self._obstacle_map = ObstacleMap(thresholds_mm=TOF_THRESHOLDS_MM)
         self._sweeper = AutoSweeper(
             arm_state=self._state,
             bridge=self._bridge,
@@ -245,9 +246,17 @@ class BraccioController:
                     f"ToF failed to detect, IR is second line of defense"
                 )
             elif response == ObstacleResponse.REPLAN:
+                # Determine which channel fired and its threshold for display
+                ch_idx = -1
+                try:
+                    ch_idx = int(source.replace('tof_ch', ''))
+                except (ValueError, AttributeError):
+                    pass
+                thresholds = snap.get('tof_thresholds_mm', TOF_THRESHOLDS_MM)
+                ch_thresh = thresholds[ch_idx] if 0 <= ch_idx < len(thresholds) else '?'
                 self._state.last_error = (
                     f"ToF: obstacle at {dist:.0f} mm "
-                    f"(threshold={snap['tof_threshold_mm']:.0f} mm, "
+                    f"(ch{ch_idx} threshold={ch_thresh:.0f} mm, "
                     f"src={source}) — REPLAN TRAJECTORY"
                 )
             else:
@@ -373,14 +382,19 @@ class BraccioController:
                 self._tof_plotter.toggle_logging()
             return
         if action == 'tof_threshold_inc':
+            # Adjust primary (side) channel thresholds only
             with self._tof_state._lock:
-                self._tof_state.tof_threshold_mm = min(
-                    3000.0, self._tof_state.tof_threshold_mm + 50.0)
+                for ch in range(len(self._tof_state.tof_thresholds_mm)):
+                    if ch not in SENSOR_IGNORE_CHANNELS:
+                        self._tof_state.tof_thresholds_mm[ch] = min(
+                            3000.0, self._tof_state.tof_thresholds_mm[ch] + 50.0)
             return
         if action == 'tof_threshold_dec':
             with self._tof_state._lock:
-                self._tof_state.tof_threshold_mm = max(
-                    50.0, self._tof_state.tof_threshold_mm - 50.0)
+                for ch in range(len(self._tof_state.tof_thresholds_mm)):
+                    if ch not in SENSOR_IGNORE_CHANNELS:
+                        self._tof_state.tof_thresholds_mm[ch] = max(
+                            50.0, self._tof_state.tof_thresholds_mm[ch] - 50.0)
             return
         # ── Autonomous sweep ──────────────────────────────────────────────
         if action == 'sweep_toggle':

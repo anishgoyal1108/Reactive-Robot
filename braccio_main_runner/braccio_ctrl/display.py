@@ -33,7 +33,7 @@ Layout
 
 import curses
 import numpy as np
-from .constants import JOINT_LIMITS, JOINT_NAMES
+from .constants import JOINT_LIMITS, JOINT_NAMES, SENSOR_IGNORE_CHANNELS, SENSOR_ADVISORY_CHANNELS
 
 # Color pair indices
 _C_TITLE   = 1
@@ -166,18 +166,25 @@ class CursesDisplay:
                           curses.color_pair(_C_LABEL) | curses.A_UNDERLINE)
         row += 1
 
-        # Per-channel summary: CH0: 450mm  CH1: 320mm  CH2: --  CH3: 1200mm
+        # Per-channel summary: dist / threshold, with authority labels
         if row < h - 1:
             parts = []
             num_ch = tof.get('num_channels', 4)
+            thresholds = tof.get('tof_thresholds_mm', [300.0] * num_ch)
             for ch in range(num_ch):
+                if ch in SENSOR_IGNORE_CHANNELS:
+                    parts.append(f"CH{ch}:[ign]")
+                    continue
                 grid = tof['grids'][ch]
+                thr  = thresholds[ch] if ch < len(thresholds) else 300.0
+                tag  = '(adv)' if ch in SENSOR_ADVISORY_CHANNELS else ''
                 if np.isnan(grid).all():
-                    parts.append(f"CH{ch}: --")
+                    parts.append(f"CH{ch}:--/{thr:.0f}{tag}")
                 else:
                     mn = float(np.nanmin(grid))
-                    parts.append(f"CH{ch}: {mn:.0f}mm")
-            line = "  " + "   ".join(parts)
+                    flag = '!' if mn < thr else ' '
+                    parts.append(f"CH{ch}:{mn:.0f}/{thr:.0f}{tag}{flag}")
+            line = "  " + "  ".join(parts)
             self._safe_addstr(row, 0, line[:w - 1], curses.color_pair(_C_DIM))
             row += 1
 
@@ -196,10 +203,12 @@ class CursesDisplay:
 
         # Obstacle response
         if row < h - 1:
-            obs = state.get('obstacle_response', 'clear')
-            src = state.get('obstacle_source', '')
-            dist = state.get('obstacle_dist_mm', -1)
-            thresh = tof.get('tof_threshold_mm', 300)
+            obs    = state.get('obstacle_response', 'clear')
+            src    = state.get('obstacle_source', '')
+            dist   = state.get('obstacle_dist_mm', -1)
+            thresholds = tof.get('tof_thresholds_mm', [300.0, 300.0, 50.0, 50.0])
+            thresh = min(thresholds[ch] for ch in range(len(thresholds))
+                         if ch not in SENSOR_IGNORE_CHANNELS)
 
             if obs == 'back_away':
                 line = f"  *** OBSTACLE: BACK AWAY (IR, ToF missed!) ***"

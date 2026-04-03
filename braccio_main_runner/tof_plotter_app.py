@@ -102,6 +102,15 @@ class ToFPlotterApp:
         # Drawing counters
         self._draw_count = [0] * _NUM_CH
 
+        # UDP / link diagnostics (for “no data” vs “masked” vs “wrong process”)
+        self._udp_pkts_window = 0
+        self._udp_rate_t0    = time.monotonic()
+        self._udp_rate_hz    = 0.0
+        self._teensy_ok      = False
+        self._teensy_port    = ''
+        self._diag_vc        = [0] * _NUM_CH
+        self._diag_zc        = [0] * _NUM_CH
+
     def run(self):
         self._build_main_figure()
         self._anim = FuncAnimation(
@@ -146,6 +155,9 @@ class ToFPlotterApp:
             self._ax_surf.append(ax_s)
             self._surfaces.append(surf)
 
+        self._link_txt = fig.text(
+            0.5, 0.97, '', ha='center', fontsize=8, color='#444444',
+        )
         self._status_txt = fig.text(
             0.5, 0.01, '', ha='center', fontsize=8, color='red',
             fontweight='bold',
@@ -154,7 +166,7 @@ class ToFPlotterApp:
                 '[0] toggle  [1-4] pop-out')
         fig.text(0.5, 0.005, hint, ha='center', fontsize=6, color='#888888')
         fig.canvas.mpl_connect('key_press_event', self._on_key)
-        fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+        fig.tight_layout(rect=[0, 0.03, 1, 0.92])
         self._fig = fig
 
     def _build_ind_figure(self, ch: int):
@@ -191,10 +203,17 @@ class ToFPlotterApp:
             try:
                 data, _ = self._sock.recvfrom(65536)
                 latest = json.loads(data)
+                self._udp_pkts_window += 1
             except BlockingIOError:
                 break
             except Exception:
                 break
+
+        dt = now - self._udp_rate_t0
+        if dt >= 1.0:
+            self._udp_rate_hz = self._udp_pkts_window / dt
+            self._udp_pkts_window = 0
+            self._udp_rate_t0 = now
 
         if latest is not None:
             for ch in range(self._num_ch):
@@ -209,12 +228,34 @@ class ToFPlotterApp:
                                                   self._obstacle_dist_mm)
             self._tof_threshold_mm  = latest.get('tof_threshold_mm',
                                                   self._tof_threshold_mm)
+            self._teensy_ok = latest.get('teensy_connected', False)
+            self._teensy_port = latest.get('teensy_port', '')
+            self._diag_vc = latest.get('diag_valid_cells', self._diag_vc)
+            self._diag_zc = latest.get('diag_zone_count', self._diag_zc)
+
+        if self._udp_rate_hz < 0.05:
+            link = ('UDP: no packets — run braccio_ctrl with '
+                    f'--teensy-port (this app listens on :{self._port})')
+        else:
+            ts = ('Teensy serial OK' if self._teensy_ok
+                  else 'Teensy serial NOT OPEN in runner')
+            port = self._teensy_port or '(port ?)'
+            link = f'UDP ~{self._udp_rate_hz:.1f} pkt/s | {ts} {port}'
+        self._link_txt.set_text(link)
 
         for ch in range(self._num_ch):
             grid = self._grids[ch]
+            fc   = self._frame_cnt[ch]
+            vc = self._diag_vc[ch] if ch < len(self._diag_vc) else 0
+            zc = self._diag_zc[ch] if ch < len(self._diag_zc) else 0
             if np.isnan(grid).all():
-                zN     = np.zeros((N, N), dtype=np.float32)
-                suffix = 'NO DATA'
+                zN = np.zeros((N, N), dtype=np.float32)
+                if fc > 0 and zc > 0 and vc == 0:
+                    suffix = 'MASKED'
+                elif fc > 0:
+                    suffix = 'NO CELLS'
+                else:
+                    suffix = 'NO DATA'
             else:
                 zN     = _upsample_bilinear(grid, N)
                 suffix = 'LIVE'
@@ -409,8 +450,13 @@ class ToFPlotterApp:
 def main():
     parser = argparse.ArgumentParser(
         description='Standalone real-time ToF heatmap + 3-D surface viewer')
-    parser.add_argument('--port', type=int, default=TOF_DATA_PORT,
-                        help=f'UDP port to listen on (default {TOF_DATA_PORT})')
+    parser.add_argument(
+        '--port', type=int, default=TOF_DATA_PORT,
+        help=(
+            f'UDP listen port from braccio_ctrl (default {TOF_DATA_PORT}). '
+            'This is not a /dev/tty device; use tof_serial_diagnose.py for serial.'
+        ),
+    )
     args = parser.parse_args()
 
     print(f'Listening for ToF data on UDP :{args.port}')

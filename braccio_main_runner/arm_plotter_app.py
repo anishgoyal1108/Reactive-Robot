@@ -290,8 +290,13 @@ class ArmPlotterApp:
 def main():
     parser = argparse.ArgumentParser(
         description='Standalone real-time arm joint-angle plotter')
-    parser.add_argument('--port', type=int, default=ARM_DATA_PORT,
-                        help=f'UDP port to listen on (default {ARM_DATA_PORT})')
+    parser.add_argument(
+        '--port', type=int, default=ARM_DATA_PORT,
+        help=(
+            f'UDP listen port from braccio_ctrl (default {ARM_DATA_PORT}); '
+            'not a serial device path.'
+        ),
+    )
     args = parser.parse_args()
 
     print(f'Listening for arm data on UDP :{args.port}')

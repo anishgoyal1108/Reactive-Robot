@@ -40,11 +40,14 @@ from .constants import (
     SENSOR_MOUNT_TOP_OFFSET,
     SENSOR_MOUNT_BOTTOM_OFFSET,
     SENSOR_PRIMARY_CHANNELS,
+    SENSOR_IGNORE_CHANNELS,
     TOF_THRESHOLD_MM,
+    TOF_THRESHOLDS_MM,
     SWEEP_OBSTACLE_MARGIN_DEG,
     L1, L2, L3,
 )
 from .ik_solver import polar_to_cartesian
+from .obstacle_memory import PersistentObstacleMemory
 
 
 # ── Sensor mount geometry ─────────────────────────────────────────────────────
@@ -160,11 +163,14 @@ class ObstacleMap:
         self._max_age_s   = max_age_s
         self._last_obs_t  = 0.0          # time of most recent valid observation
         self._tracker_last_update = 0.0  # epoch time of last Kalman update
+        self._memory = PersistentObstacleMemory()
+        self._memory_last_t = time.time()
 
     # ── Main update call (from controller main loop) ──────────────────────────
 
     def update(self, tof_grids: list, arm_snap: dict,
-               imu_snap: dict, imu_R: Optional[np.ndarray] = None) -> None:
+               imu_snap: dict, imu_R: Optional[np.ndarray] = None,
+               tof_thresholds_mm: Optional[list] = None) -> None:
         """
         Project all active ToF grids into world frame and refresh the cloud.
 
@@ -198,13 +204,20 @@ class ObstacleMap:
         now = time.time()
         new_clouds: List[ObstacleCloud] = []
 
+        thresholds = tof_thresholds_mm if tof_thresholds_mm else TOF_THRESHOLDS_MM
         for ch, grid in enumerate(tof_grids):
+            if ch in SENSOR_IGNORE_CHANNELS:
+                continue
             if grid is None or np.isnan(grid).all():
                 continue
 
             mount_offset, R_sensor_to_ee = _SENSOR_CONFIGS[ch]
+            ch_thresh = (thresholds[ch]
+                         if ch < len(thresholds)
+                         else TOF_THRESHOLD_MM)
             pts_world = self._project_grid(
-                grid, mount_offset, R_sensor_to_ee, ee_pos, R_base, R_imu
+                grid, mount_offset, R_sensor_to_ee, ee_pos, R_base, R_imu,
+                ch_thresh
             )
 
             if pts_world is not None and len(pts_world) > 0:
@@ -217,10 +230,17 @@ class ObstacleMap:
                 ))
 
         with self._lock:
+            dt_mem = now - self._memory_last_t
+            if dt_mem > 0:
+                self._memory.tick_decay(dt_mem)
+                self._memory_last_t = now
+
             # Discard stale observations
             cutoff = now - self._max_age_s
             self._clouds = [c for c in self._clouds if c.timestamp > cutoff]
             self._clouds.extend(new_clouds)
+            for c in new_clouds:
+                self._memory.ingest(c.points)
 
             # Feed Kalman filter with the most authoritative centroid
             # (prefer primary channels CH0/CH1 over confirmation channels)
@@ -318,6 +338,10 @@ class ObstacleMap:
                 return np.empty((0, 3), dtype=np.float64)
             return np.vstack(pts)
 
+    def memory_occupied_near(self, pos_xyz: tuple[float, float, float], r_mm: float) -> bool:
+        """Fast occupancy check from persistent voxel memory."""
+        return self._memory.query_radius(pos_xyz, r_mm)
+
     def snapshot(self) -> dict:
         """Thread-safe snapshot for display."""
         with self._lock:
@@ -334,6 +358,7 @@ class ObstacleMap:
                 'kalman_uncertainty_mm': unc,
                 'has_active':        self.has_active_obstacle(),
                 'last_obs_age_s':    time.time() - self._last_obs_t,
+                'memory':            self._memory.snapshot_stats(),
             }
 
     # ── Internal projection ───────────────────────────────────────────────────
@@ -343,7 +368,8 @@ class ObstacleMap:
                       R_s2ee: np.ndarray,
                       ee_pos: np.ndarray,
                       R_base: np.ndarray,
-                      R_imu: np.ndarray) -> Optional[np.ndarray]:
+                      R_imu: np.ndarray,
+                      threshold_mm: float) -> Optional[np.ndarray]:
         """
         Project one ToF grid (4×4 or 8×8) into world-frame XYZ points.
 
@@ -359,7 +385,7 @@ class ObstacleMap:
         for row in range(rows):
             for col in range(cols):
                 d = float(grid[row, col])
-                if math.isnan(d) or d <= 0 or d >= self._threshold:
+                if math.isnan(d) or d <= 0 or d >= threshold_mm:
                     continue
 
                 # Bearing angles in sensor frame

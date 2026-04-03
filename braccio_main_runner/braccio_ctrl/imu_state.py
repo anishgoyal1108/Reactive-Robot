@@ -52,6 +52,8 @@ class IMUState:
         self.calibrated: bool = False
 
         self.last_rx: float = 0.0   # epoch time of last IMU packet
+        self._rot_cache: np.ndarray | None = None
+        self._rot_cache_key: tuple | None = None
 
     # ── Public interface ──────────────────────────────────────────────────────
 
@@ -66,6 +68,8 @@ class IMUState:
             self.ax = ax;  self.ay = ay;  self.az = az
             self.mx = mx;  self.my = my;  self.mz = mz
             self.last_rx = time.time()
+            self._rot_cache = None
+            self._rot_cache_key = None
 
     def record_calibration(self) -> None:
         """
@@ -77,6 +81,8 @@ class IMUState:
         with self._lock:
             self.yaw_calibration_offset = self.yaw_deg
             self.calibrated = True
+            self._rot_cache = None
+            self._rot_cache_key = None
 
     def yaw_relative(self) -> float:
         """
@@ -101,24 +107,35 @@ class IMUState:
         included for correctness.
         """
         with self._lock:
-            r = math.radians(self.roll_deg)
-            p = math.radians(self.pitch_deg)
+            roll = self.roll_deg
+            pitch = self.pitch_deg
             # Use calibrated yaw for world-frame projection
             if self.calibrated:
-                y = math.radians(self.yaw_relative())
+                yaw = self.yaw_relative()
             else:
-                y = math.radians(self.yaw_deg)
+                yaw = self.yaw_deg
+            key = (round(roll, 6), round(pitch, 6), round(yaw, 6), self.calibrated)
+            if self._rot_cache is not None and self._rot_cache_key == key:
+                return self._rot_cache.copy()
+
+        r = math.radians(roll)
+        p = math.radians(pitch)
+        y = math.radians(yaw)
 
         cr, sr = math.cos(r), math.sin(r)
         cp, sp = math.cos(p), math.sin(p)
         cy, sy = math.cos(y), math.sin(y)
 
         # ZYX (yaw → pitch → roll)
-        return np.array([
+        R = np.array([
             [cy*cp,  cy*sp*sr - sy*cr,  cy*sp*cr + sy*sr],
             [sy*cp,  sy*sp*sr + cy*cr,  sy*sp*cr - cy*sr],
             [  -sp,            cp*sr,             cp*cr  ],
         ], dtype=np.float64)
+        with self._lock:
+            self._rot_cache = R
+            self._rot_cache_key = key
+        return R.copy()
 
     def snapshot(self) -> dict:
         """Return a copy of all display-relevant IMU state."""

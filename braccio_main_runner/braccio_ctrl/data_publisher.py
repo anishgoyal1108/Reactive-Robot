@@ -57,6 +57,12 @@ class DataPublisher:
                 'obstacle_dist_mm':  tof_snap['obstacle_dist_mm'],
                 'tof_threshold_mm':  tof_snap['tof_threshold_mm'],
                 'num_channels':      tof_snap['num_channels'],
+                'teensy_connected':  tof_snap.get('connected', False),
+                'teensy_port':       tof_snap.get('port', ''),
+                'diag_raw_min_mm':   tof_snap.get('diag_raw_min_mm', []),
+                'diag_raw_max_mm':   tof_snap.get('diag_raw_max_mm', []),
+                'diag_valid_cells':  tof_snap.get('diag_valid_cells', []),
+                'diag_zone_count':   tof_snap.get('diag_zone_count', []),
             }
             self._sock.sendto(json.dumps(payload).encode(), self._tof_addr)
         except Exception:

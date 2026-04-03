@@ -11,7 +11,7 @@ Live matplotlib plots are provided by standalone companion scripts
 import argparse
 import sys
 
-from .serial_bridge import SerialBridge
+from .serial_bridge import SerialBridge, ensure_serial_device_path
 from .controller    import BraccioController
 from .constants     import (
     DEFAULT_PORT, BAUD_RATE, TOF_DEFAULT_PORT, TOF_BAUD_RATE,
@@ -28,7 +28,11 @@ def main() -> None:
         'port',
         nargs='?',
         default=DEFAULT_PORT,
-        help=f'Serial port for Braccio arm (default: {DEFAULT_PORT})',
+        help=(
+            f'USB serial device for Braccio arm, e.g. /dev/ttyACM0 (default: '
+            f'{DEFAULT_PORT}). Not a number — {TOF_DATA_PORT} is UDP for the '
+            f'plotter, not this argument.'
+        ),
     )
     parser.add_argument(
         '--baud',
@@ -61,6 +65,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    try:
+        ensure_serial_device_path(args.port, 'Braccio arm serial (first argument)')
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        sys.exit(2)
+
     if args.list_ports:
         ports = SerialBridge.list_ports()
         if not ports:
@@ -78,6 +88,12 @@ def main() -> None:
             teensy_port = TOF_DEFAULT_PORT
         elif args.teensy_port:
             teensy_port = args.teensy_port
+            try:
+                ensure_serial_device_path(
+                    teensy_port, 'Teensy serial (--teensy-port)')
+            except ValueError as exc:
+                print(exc, file=sys.stderr)
+                sys.exit(2)
 
     print(f"Connecting to Braccio on {args.port} at {args.baud} baud...")
     if teensy_port:

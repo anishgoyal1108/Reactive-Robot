@@ -37,10 +37,11 @@ import math
 import threading
 import time
 from typing import Optional
+import numpy as np
 
 from .arm_state    import ArmState
 from .serial_bridge import SerialBridge
-from .ik_solver    import solve_ik, polar_to_cartesian
+from .ik_solver    import solve_ik, polar_to_cartesian, reachability
 from .obstacle_map import ObstacleMap
 from .tof_sensor   import ToFState, ObstacleResponse
 from .protocol     import cmd_set_all, cmd_set_delta
@@ -50,6 +51,7 @@ from .constants    import (
     SWEEP_STEP_DEG, SWEEP_TICK_HZ,
     SWEEP_DELTA_NORMAL, SWEEP_DELTA_REPLAN,
     SWEEP_BACK_STEPS, SWEEP_OBSTACLE_MARGIN_DEG,
+    SWEEP_Z_CANDIDATES, SWEEP_COLLISION_RADIUS_MM,
     DELTA_MIN, DELTA_MAX,
     R_MIN, R_MAX, Z_MIN, Z_MAX,
 )
@@ -232,12 +234,23 @@ class AutoSweeper:
 
         bypass = self._compute_bypass_theta(forbidden)
 
-        if bypass is not None:
+        if bypass is not None and self._is_position_clear(bypass, self.sweep_z):
             with self._state_lock:
                 self._bypass_theta    = bypass
                 self._current_theta   = bypass
                 self._sweep_state     = SweepState.RUNNING
             self._send_move(bypass)
+            self._send_delta(self.delta_normal)
+            return
+
+        # Horizontal bypass failed or is still blocked; try higher/lower sweep Z.
+        new_z = self._find_clear_z(self._current_theta)
+        if new_z is not None:
+            with self._state_lock:
+                self.sweep_z = new_z
+                self._bypass_theta = None
+                self._sweep_state = SweepState.RUNNING
+            self._send_move(self._current_theta)
             self._send_delta(self.delta_normal)
         else:
             # No bypass available — hold position, wait for obstacle to clear
@@ -300,10 +313,42 @@ class AutoSweeper:
 
         return round(candidate, 1)
 
+    def _is_position_clear(self, theta: float, z: float) -> bool:
+        """Return True if no obstacle point is within collision radius."""
+        x, y = polar_to_cartesian(theta, self.sweep_r)
+        p = (x, y, z)
+        if self._obstacle_map.memory_occupied_near(p, SWEEP_COLLISION_RADIUS_MM):
+            return False
+        pts = self._obstacle_map.all_points()
+        if pts.size == 0:
+            return True
+        dx = pts[:, 0] - p[0]
+        dy = pts[:, 1] - p[1]
+        dz = pts[:, 2] - p[2]
+        d2 = dx * dx + dy * dy + dz * dz
+        return bool(np.all(d2 >= (SWEEP_COLLISION_RADIUS_MM ** 2)))
+
+    def _find_clear_z(self, theta: float) -> Optional[float]:
+        """
+        Find a reachable, obstacle-clear z candidate for current sweep_r/theta.
+        """
+        for z in SWEEP_Z_CANDIDATES:
+            if z < Z_MIN or z > Z_MAX:
+                continue
+            if reachability(theta, self.sweep_r, z) != 'ok':
+                continue
+            if self._is_position_clear(theta, z):
+                return float(z)
+        return None
+
     # ── Command helpers ───────────────────────────────────────────────────────
 
     def _send_move(self, theta: float) -> None:
         """Compute IK for (theta, sweep_r, sweep_z) and send SET ALL."""
+        if not self._is_position_clear(theta, self.sweep_z):
+            with self._state_lock:
+                self._sweep_state = SweepState.PAUSED_OBSTACLE
+            return
         x, y = polar_to_cartesian(theta, self.sweep_r)
         result = solve_ik(x, y, self.sweep_z)
         if result is None:

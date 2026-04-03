@@ -26,7 +26,7 @@ import queue
 
 from .arm_state        import ArmState
 from .serial_bridge    import SerialBridge
-from .ik_solver        import solve_ik, polar_to_cartesian
+from .ik_solver        import solve_ik, polar_to_cartesian, fk_polar
 from .keyboard_handler import KeyboardHandler
 from .display          import CursesDisplay
 from .state_library    import StateLibrary
@@ -44,7 +44,7 @@ from .constants import (
     DELTA_MIN, DELTA_MAX,
     JOINT_WRIST_ROT, JOINT_GRIPPER,
     R_MIN, R_MAX, Z_MIN, Z_MAX,
-    BAUD_RATE, TOF_NUM_CHANNELS, TOF_BAUD_RATE, TOF_THRESHOLD_MM,
+    BAUD_RATE, TOF_NUM_CHANNELS, TOF_BAUD_RATE, TOF_THRESHOLD_MM, TOF_THRESHOLDS_MM,
 )
 
 
@@ -70,7 +70,8 @@ class BraccioController:
 
         # ── ToF / IR subsystem ────────────────────────────────────────────
         self._tof_state  = ToFState(num_channels=TOF_NUM_CHANNELS)
-        self._tof_state.tof_threshold_mm = TOF_THRESHOLD_MM
+        self._tof_state.tof_threshold_mm = TOF_THRESHOLDS_MM[0]
+        self._tof_state.tof_thresholds_mm = list(TOF_THRESHOLDS_MM)
         self._imu_state  = IMUState()
         self._tof_bridge = ToFBridge(self._tof_state, self._imu_state)
         self._teensy_port = teensy_port
@@ -105,10 +106,12 @@ class BraccioController:
         if self._teensy_port:
             ok = self._tof_bridge.connect(self._teensy_port, self._teensy_baud)
             if not ok:
+                detail = self._tof_bridge._last_open_error or (
+                    f"cannot open {self._teensy_port} "
+                    f"(try: python tof_serial_diagnose.py {self._teensy_port})"
+                )
                 with self._state._lock:
-                    self._state.last_error = (
-                        f"ToF Teensy: cannot open {self._teensy_port}"
-                    )
+                    self._state.last_error = f"ToF Teensy: {detail}"
 
         # Main loop (~5 Hz, paced by keyboard halfdelay)
         while True:
@@ -225,9 +228,10 @@ class BraccioController:
                     f"ToF failed to detect, IR is second line of defense"
                 )
             elif response == ObstacleResponse.REPLAN:
+                ch_thr = snap.get('tof_threshold_mm', TOF_THRESHOLD_MM)
                 self._state.last_error = (
                     f"ToF: obstacle at {dist:.0f} mm "
-                    f"(threshold={snap['tof_threshold_mm']:.0f} mm, "
+                    f"(threshold={ch_thr:.0f} mm, "
                     f"src={source}) — REPLAN TRAJECTORY"
                 )
             else:
@@ -245,7 +249,8 @@ class BraccioController:
         imu_snap = self._imu_state.snapshot()
         imu_R    = self._imu_state.rotation_matrix()
         self._obstacle_map.update(
-            tof_snap['grids'], arm_snap, imu_snap, imu_R
+            tof_snap['grids'], arm_snap, imu_snap, imu_R,
+            tof_thresholds_mm=tof_snap.get('tof_thresholds_mm'),
         )
 
     # ── IMU calibration ────────────────────────────────────────────────────
@@ -280,7 +285,15 @@ class BraccioController:
             with self._state._lock:
                 if rtype == 'pos':
                     # Sync joint shadow from Arduino's actual commanded angles
-                    self._state.joints = list(resp['positions'])
+                    positions = list(resp['positions'])
+                    self._state.joints = positions
+                    try:
+                        theta, r, z = fk_polar(positions)
+                        self._state.theta = theta
+                        self._state.r = r
+                        self._state.z = z
+                    except Exception:
+                        pass
                     self._state.last_resp = "POS synced"
                     self._state.last_error = ""
                 elif rtype == 'error':
@@ -311,16 +324,6 @@ class BraccioController:
             return
         if action == 'seq_editor':
             self._open_seq_editor()
-            return
-        if action == 'tof_threshold_inc':
-            with self._tof_state._lock:
-                self._tof_state.tof_threshold_mm = min(
-                    3000.0, self._tof_state.tof_threshold_mm + 50.0)
-            return
-        if action == 'tof_threshold_dec':
-            with self._tof_state._lock:
-                self._tof_state.tof_threshold_mm = max(
-                    50.0, self._tof_state.tof_threshold_mm - 50.0)
             return
         # ── Autonomous sweep ──────────────────────────────────────────────
         if action == 'sweep_toggle':

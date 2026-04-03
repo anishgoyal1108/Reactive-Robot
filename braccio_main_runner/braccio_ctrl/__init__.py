@@ -11,6 +11,9 @@ Live matplotlib plotters are separate processes (no threading):
   python arm_plotter_app.py          # joint-angle time series
   python tof_plotter_app.py          # ToF heatmaps + 3-D surfaces
 
+ToF serial troubleshooting (close other programs using the port):
+  python tof_serial_diagnose.py /dev/ttyACM0 --seconds 5
+
 Modules
 -------
   constants       — all configuration values and key bindings

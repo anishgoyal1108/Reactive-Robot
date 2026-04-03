@@ -21,7 +21,31 @@ except ImportError:
     _SERIAL_AVAILABLE = False
 
 from .protocol import parse_response, cmd_ping
-from .constants import BAUD_RATE
+from .constants import BAUD_RATE, ARM_DATA_PORT, TOF_DATA_PORT
+
+
+def ensure_serial_device_path(port: str, what: str) -> None:
+    """
+    Reject mistaken use of UDP plotter ports (9870/9871) where a /dev path
+    is required.  Pyserial would otherwise try to open a bogus path and
+    report errno 2.
+    """
+    if not port or not isinstance(port, str):
+        return
+    p = port.strip()
+    if not p.isdigit():
+        return
+    n = int(p)
+    hint = ''
+    if n in (ARM_DATA_PORT, TOF_DATA_PORT):
+        hint = (
+            f' {n} is the UDP port for arm_plotter_app ({ARM_DATA_PORT}) or '
+            f'tof_plotter_app ({TOF_DATA_PORT}); serial devices look like '
+            f'/dev/ttyACM0 or COM3.'
+        )
+    raise ValueError(
+        f'{what} must be a USB serial device path, not the number {p!r}.{hint}'
+    )
 
 
 class SerialBridge:
@@ -45,6 +69,11 @@ class SerialBridge:
         we wait 2 s after opening and then drain any startup messages.
         """
         if not _SERIAL_AVAILABLE:
+            return False
+        try:
+            ensure_serial_device_path(self._port, "Braccio serial port")
+        except ValueError as exc:
+            self.connect_error = str(exc)
             return False
         try:
             self._ser = serial.Serial(

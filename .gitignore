@@ -1,2 +1,8 @@
 .venv/
 .mypy_cache/
+__pycache__/
+*.pyc
+
+# Runtime artefacts — regenerated on every controller run
+braccio_main_runner/session_logs/
+

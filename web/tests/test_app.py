@@ -24,6 +24,25 @@ def test_health_endpoint(client):
     assert body["running"] is False
 
 
+# ── URDF ───────────────────────────────────────────────────────────────
+
+
+def test_urdf_endpoint_serves_braccio_xml(client):
+    resp = client.get("/urdf")
+    assert resp.status_code == 200
+    # application/xml, application/xml; charset=utf-8, etc. all ok.
+    assert "xml" in resp.headers["content-type"]
+    body = resp.text
+    # Structural sanity: the 6 real joints must all be present.
+    assert '<robot name="braccio_v2">' in body
+    assert 'name="joint_base"' in body
+    assert 'name="joint_shoulder"' in body
+    assert 'name="joint_elbow"' in body
+    assert 'name="joint_wrist_vert"' in body
+    assert 'name="joint_wrist_rot"' in body
+    assert 'name="joint_gripper"' in body
+
+
 # ── State library ──────────────────────────────────────────────────────
 
 

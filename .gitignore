@@ -7,3 +7,9 @@ __pycache__/
 braccio_main_runner/session_logs/
 web/backend/sequences/
 
+# Frontend build artefacts + dependency cache
+web/frontend/node_modules/
+web/frontend/dist/
+web/frontend/.vite/
+web/frontend/*.tsbuildinfo
+

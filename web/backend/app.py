@@ -45,11 +45,12 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Optional
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from .bridge import WebBridge
 from .models import (
@@ -75,6 +76,19 @@ from .models import (
 # joint updates at 30 Hz look smooth and cut the WebSocket traffic in
 # half, which matters when several clients are connected.
 _WS_HZ = 30.0
+
+
+# Location of the hand-authored Braccio URDF that Phase 1's PyBullet
+# sim loads. Serving it at /urdf lets the Phase 4 frontend parse the
+# exact same geometry (link lengths, joint axes, limits), so the
+# on-screen arm and the simulated/physical arm cannot drift.
+_URDF_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "braccio_main_runner"
+    / "braccio_twin"
+    / "urdf"
+    / "braccio.urdf"
+)
 
 
 def create_app(bridge: Optional[WebBridge] = None) -> FastAPI:
@@ -124,6 +138,24 @@ def create_app(bridge: Optional[WebBridge] = None) -> FastAPI:
             "backend_open": br.backend.is_open(),
             "running": br.is_running(),
         }
+
+    # ── URDF (shared between twin + frontend viewer) ──────────────────
+
+    @app.get("/urdf")
+    def urdf() -> Response:
+        """
+        Serve the hand-authored Braccio URDF used by the PyBullet twin.
+
+        The Phase 4 Three.js viewer parses this file on startup to
+        derive link lengths and joint orientations, so the on-screen
+        arm matches whatever backend is driving telemetry (sim or real).
+        """
+        if not _URDF_PATH.is_file():
+            raise HTTPException(status_code=404, detail="urdf not found")
+        return Response(
+            content=_URDF_PATH.read_bytes(),
+            media_type="application/xml",
+        )
 
     # ── State library ──────────────────────────────────────────────────
 

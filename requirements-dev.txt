@@ -1,0 +1,5 @@
+# Type checking (whole-repo); install from repo root: pip install -r requirements-dev.txt
+mypy>=1.10
+types-pyserial>=3.5
+numpy>=1.24
+matplotlib>=3.7

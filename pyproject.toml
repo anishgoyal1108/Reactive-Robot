@@ -1,0 +1,12 @@
+[tool.mypy]
+python_version = "3.12"
+explicit_package_bases = true
+mypy_path = ["braccio_main_runner"]
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+files = ["braccio_main_runner", "ToF_RR_Sensing/python"]
+
+[[tool.mypy.overrides]]
+module = "mpl_toolkits.*"
+ignore_missing_imports = true

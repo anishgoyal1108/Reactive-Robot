@@ -1,6 +1,8 @@
 pyserial>=3.5
 matplotlib>=3.7
 numpy>=1.24
+# Extended DSL parser (braccio_ctrl.dsl) — Phase 2
+lark>=1.1
 # braccio_twin (digital twin) — only required when running the sim
 pybullet>=3.2.5
 contourpy==1.3.0

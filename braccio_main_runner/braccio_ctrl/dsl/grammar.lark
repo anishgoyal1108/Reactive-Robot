@@ -1,0 +1,108 @@
+// Braccio DSL — extended grammar.
+//
+// Produces the AST defined in ast_nodes.py via the Transformer in
+// parser.py. Backwards compatibility with the legacy line-based format
+// (``STATE_NAME WAIT_MS`` + optional trailing ``REPEAT N``) is handled
+// by compat.py, not by this grammar.
+//
+// Syntax summary
+//   MOVE <IDENT> [WAIT <int>]
+//   SET <JOINT> <int> [WAIT <int>]
+//   WAIT <int>
+//   HOME
+//   REPEAT <int> { ... }
+//   IF <cond> { ... } [ELSE { ... }]
+//   WHILE <cond> { ... }
+//   STATE <IDENT> { JOINTS <int int int int int int> }
+//   OBSTACLE <IDENT> { POS <x y z>; RADIUS <r>; SHAPE <kind> }
+//   # comment  (single line, ignored)
+//
+// Where
+//   <JOINT>     := B | S | E | WV | WR | G
+//   <cond>      := sensor_expr <cmp> <number>
+//   sensor_expr := TOF [ <int> ] | IR | JOINT [ <JOINT> ]
+//   <cmp>       := < | > | <= | >= | == | !=
+//
+// Tokenisation notes
+// -----------------
+// Keywords are declared as explicit terminals so they have tokenisation
+// priority over the generic ``IDENT`` regex. ``IDENT`` has priority -1
+// so ``MOVE`` is tokenised as ``MOVE``, not ``IDENT("MOVE")``, but
+// ``MOVE_ARM`` (if it ever existed) would still lex as IDENT by
+// longest-match. ``HOME_REST`` (longer than ``HOME``) lexes correctly
+// as IDENT despite ``HOME`` being a keyword.
+
+start: statement*
+
+?statement: move_stmt
+          | set_joint_stmt
+          | wait_stmt
+          | home_stmt
+          | repeat_blk
+          | if_blk
+          | while_blk
+          | def_state
+          | def_obstacle
+
+move_stmt: MOVE IDENT (WAIT INT)?
+set_joint_stmt: SET JOINT INT (WAIT INT)?
+wait_stmt: WAIT INT
+home_stmt: HOME
+
+repeat_blk: REPEAT INT LBRACE statement* RBRACE
+if_blk: IF cond LBRACE statement* RBRACE (ELSE LBRACE statement* RBRACE)?
+while_blk: WHILE cond LBRACE statement* RBRACE
+
+cond: sensor_expr CMP SIGNED_NUMBER
+
+?sensor_expr: tof_expr | ir_expr | joint_read_expr
+tof_expr: TOF LBRACK INT RBRACK
+ir_expr: IR
+joint_read_expr: JOINTKW LBRACK JOINT RBRACK
+
+def_state: STATE IDENT LBRACE JOINTS INT INT INT INT INT INT RBRACE
+def_obstacle: OBSTACLE IDENT LBRACE obs_field+ RBRACE
+obs_field: obs_pos | obs_radius | obs_shape
+obs_pos: POS SIGNED_NUMBER SIGNED_NUMBER SIGNED_NUMBER
+obs_radius: RADIUS SIGNED_NUMBER
+obs_shape: SHAPE SHAPE_KIND
+
+// ── Keywords (explicit terminals for priority) ─────────────────────────
+MOVE: "MOVE"
+SET: "SET"
+WAIT: "WAIT"
+HOME: "HOME"
+REPEAT: "REPEAT"
+IF: "IF"
+ELSE: "ELSE"
+WHILE: "WHILE"
+STATE: "STATE"
+OBSTACLE: "OBSTACLE"
+JOINTS: "JOINTS"
+POS: "POS"
+RADIUS: "RADIUS"
+SHAPE: "SHAPE"
+TOF: "TOF"
+IR: "IR"
+JOINTKW: "JOINT"
+
+// Joint tokens & shape kinds
+JOINT: "WV" | "WR" | "B" | "S" | "E" | "G"
+SHAPE_KIND: "BOX" | "SPHERE" | "CYLINDER"
+
+// Comparison operators — two-char before one-char to avoid ambiguity
+CMP: "<=" | ">=" | "==" | "!=" | "<" | ">"
+
+LBRACE: "{"
+RBRACE: "}"
+LBRACK: "["
+RBRACK: "]"
+
+IDENT.-1: /[A-Z_][A-Z0-9_]*/
+
+%import common.INT
+%import common.SIGNED_NUMBER
+%import common.WS
+COMMENT: /#[^\n]*/
+%ignore WS
+%ignore COMMENT

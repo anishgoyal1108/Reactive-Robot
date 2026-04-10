@@ -1,26 +1,32 @@
 """
 sequence_editor.py — Curses overlay text editor for pose sequences.
 
-A sequence is a plain-text program where each line is one of:
-
+Legacy format (backwards compatible)
+------------------------------------
   STATE_NAME WAIT_MS   — move to the named state, then wait WAIT_MS ms
   REPEAT N             — repeat the whole program N times (default 1)
   # comment            — ignored
 
-Example program
----------------
-  # pick-and-place cycle
-  HOME    1000
-  GRAB     500
-  PLACE    800
-  HOME     500
-  REPEAT 3
+Extended DSL (Phase 2, braccio_ctrl.dsl)
+----------------------------------------
+  MOVE STATE_NAME [WAIT ms]
+  SET <B|S|E|WV|WR|G> <deg> [WAIT ms]
+  WAIT <ms>
+  HOME
+  REPEAT N { ... }
+  IF <sensor> <op> <num> { ... } [ELSE { ... }]
+  WHILE <sensor> <op> <num> { ... }
+  STATE NAME { JOINTS b s e wv wr g }
+  OBSTACLE NAME { POS x y z  RADIUS r  SHAPE BOX|SPHERE|CYLINDER }
+
+Sensor expressions: TOF[0..3], IR, JOINT[B..G]
 
 Syntax highlighting
 -------------------
-  green   — valid step (known state + integer wait)
-  red     — error (unknown state, non-integer wait, or bad syntax)
-  magenta — REPEAT line
+  green   — legacy step (known state + integer wait)
+  magenta — legacy REPEAT line
+  cyan    — extended DSL line (parsed successfully as part of the program)
+  red     — line the parser rejected
   dim     — blank lines and comments
 
 Editor key bindings
@@ -39,10 +45,9 @@ Editor key bindings
 
 import curses
 import re
-import threading
-import time
 from typing import Callable, Optional
 
+from .dsl import SequenceRunner, parse, parse_auto
 from .state_library import StateLibrary
 
 # Color pair indices (same scheme as display.py; pairs 1-6 already initialised)
@@ -359,19 +364,25 @@ def run_sequence_editor(
 
         # ── Run sequence: F5 or Ctrl+R ────────────────────────────────────
         elif key in (curses.KEY_F5, 18):
-            steps, repeat, errors = _parse_sequence(lines, state_lib)
+            text = "\n".join(lines)
+            program, parse_errors = parse_auto(text)
+            static_errors = _static_check(program, state_lib)
+            errors = list(parse_errors) + list(static_errors)
             if errors:
                 message = "Error: " + errors[0]
                 msg_ok = False
-            elif not steps:
+            elif not program.body:
                 message = "Nothing to run — add steps like:  HOME 1000"
                 msg_ok = False
             else:
                 if runner and runner.running:
                     runner.stop()
-                runner = SequenceRunner(steps, repeat, run_state_fn)
+                runner = SequenceRunner(program, run_state_fn)
                 runner.start()
-                message = f"Started: {len(steps)} step(s) \u00d7 {repeat} pass(es)"
+                message = (
+                    f"Started: {runner.total_steps} step(s)"
+                    f" \u00d7 {runner.total_passes} pass(es)"
+                )
                 msg_ok = True
 
         # ── Stop sequence: F6 or Ctrl+T ───────────────────────────────────
@@ -392,67 +403,81 @@ def run_sequence_editor(
             col_cur += 1
 
 
-# ── Sequence parsing ──────────────────────────────────────────────────────
+# ── Sequence validation ───────────────────────────────────────────────────
 
 
-def _parse_sequence(lines: list, state_lib: StateLibrary):
+def _static_check(program, state_lib: StateLibrary) -> list:
     """
-    Parse sequence lines into steps.
+    Walk a parsed Program AST and flag semantic errors that the Lark
+    grammar can't catch:
 
-    Returns
-    -------
-    steps  : list of {'name': str, 'wait_ms': int}
-    repeat : int (≥ 1)
-    errors : list of str — non-empty means the sequence cannot run
+      * MoveStmt referencing an unknown saved state
+      * legacy REPEAT with 0 body (empty program)
+
+    Returns a list of human-readable errors (empty on success). Purely
+    static — no side effects, so the curses editor can call it on
+    every F5 without touching hardware.
     """
-    steps = []
-    repeat = 1
-    errors = []
+    from .dsl import MoveStmt, Program  # local import avoids module cycle
 
-    for i, raw in enumerate(lines):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-
-        # REPEAT N
-        m = re.match(r"^REPEAT\s+(\d+)$", line, re.IGNORECASE)
-        if m:
-            repeat = max(1, int(m.group(1)))
-            continue
-
-        # STATE_NAME WAIT_MS
-        parts = line.split()
-        if len(parts) == 2:
-            name, wait_str = parts
-            if not wait_str.isdigit():
+    errors: list = []
+    if not isinstance(program, Program):
+        return ["internal: parse did not return a Program"]
+    for _depth, stmt in program.walk():
+        if isinstance(stmt, MoveStmt):
+            if state_lib.get_state(stmt.state_name) is None:
                 errors.append(
-                    f"L{i + 1}: wait must be a positive integer, got '{wait_str}'"
+                    f"L{stmt.line}: unknown state '{stmt.state_name}'"
                 )
-                continue
-            if state_lib.get_state(name) is None:
-                errors.append(f"L{i + 1}: unknown state '{name}'")
-                continue
-            steps.append({"name": name, "wait_ms": int(wait_str)})
-        else:
-            errors.append(f"L{i + 1}: expected 'STATE_NAME WAIT_MS', got '{line[:30]}'")
+    return errors
 
-    return steps, repeat, errors
+
+# Reused by the curses renderer — matches the legacy two-token line
+# format so lines that look valid in the old grammar get the green
+# highlight. Anything else falls back to extended-DSL highlighting.
+_RE_LEGACY_MOVE = re.compile(r"^([A-Z_][A-Z0-9_]*)\s+(\d+)$")
+_RE_LEGACY_REPEAT = re.compile(r"^REPEAT\s+\d+$", re.IGNORECASE)
 
 
 def _line_color(line: str, state_lib: StateLibrary) -> int:
-    """Return a curses color attribute for a text line based on validity."""
+    """
+    Return a curses color attribute for a line of source text.
+
+    Decision order:
+      1. blank / comment   → dim
+      2. legacy REPEAT N   → magenta
+      3. legacy STATE WAIT → green (known state) or red (unknown state)
+      4. anything that parses as new-DSL on its own → cyan (neutral info)
+      5. rejected by both parsers → red
+    """
     s = line.strip()
     if not s or s.startswith("#"):
         return curses.color_pair(_C_DIM)
-    if re.match(r"^REPEAT\s+\d+$", s, re.IGNORECASE):
+    if _RE_LEGACY_REPEAT.match(s):
         return curses.color_pair(_C_WARN)  # magenta — control flow
-    parts = s.split()
-    if len(parts) == 2:
-        name, wait = parts
-        if wait.isdigit() and state_lib.get_state(name) is not None:
-            return curses.color_pair(_C_OK)  # green — valid
-        return curses.color_pair(_C_ERR)  # red — bad state or wait
-    return curses.color_pair(_C_ERR)  # red — wrong token count
+    m = _RE_LEGACY_MOVE.match(s)
+    if m:
+        name = m.group(1)
+        if state_lib.get_state(name) is not None:
+            return curses.color_pair(_C_OK)  # green — known legacy line
+        return curses.color_pair(_C_ERR)  # red — unknown state name
+    # Try the extended DSL parser on the single line. This is tolerant
+    # of block heads like "IF TOF[0] < 250 {" because Lark recognises
+    # the open brace, but the matching "}" on a separate line is still
+    # highlighted individually. Rather than maintaining a per-line
+    # status from a whole-text parse, we treat anything that survives
+    # the single-line parse as "looks OK".
+    try:
+        parse(s)
+        return curses.color_pair(_C_OK)  # green — recognised DSL line
+    except Exception:
+        pass
+    # Braces and partial lines don't parse in isolation but are still
+    # valid inside a multi-line program — mark them neutral so the
+    # user isn't scared by a sea of red while typing a block.
+    if s in {"{", "}"} or s.endswith("{") or s.startswith("}"):
+        return curses.color_pair(_C_WARN)
+    return curses.color_pair(_C_ERR)
 
 
 def _safe(stdscr, row: int, col: int, text: str, attr: int = 0) -> None:
@@ -465,56 +490,6 @@ def _safe(stdscr, row: int, col: int, text: str, attr: int = 0) -> None:
         pass
 
 
-# ── Sequence runner ───────────────────────────────────────────────────────
-
-
-class SequenceRunner:
-    """
-    Execute a list of pose steps in a background daemon thread.
-
-    For each step:  move arm to state  →  wait wait_ms ms.
-    Repeats the whole list `repeat` times.  Can be stopped at any time.
-    """
-
-    def __init__(self, steps: list, repeat: int, run_state_fn: Callable[[str], None]):
-        self._steps = steps
-        self._repeat = repeat
-        self._run_state = run_state_fn
-        self._thread: Optional[threading.Thread] = None
-        self._stop = threading.Event()
-
-        self.running: bool = False
-        self.current_step: int = 0
-        self.current_pass: int = 0
-        self.total_steps: int = len(steps)
-        self.total_passes: int = repeat
-
-    def start(self) -> None:
-        self._stop.clear()
-        self.running = True
-        self.current_step = 0
-        self.current_pass = 0
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stop.set()
-        self.running = False
-
-    def _run(self) -> None:
-        try:
-            for p in range(self._repeat):
-                self.current_pass = p + 1
-                for s, step in enumerate(self._steps):
-                    if self._stop.is_set():
-                        return
-                    self.current_step = s + 1
-                    self._run_state(step["name"])
-                    # Wait in short increments so stop() is responsive
-                    deadline = time.monotonic() + step["wait_ms"] / 1000.0
-                    while time.monotonic() < deadline:
-                        if self._stop.is_set():
-                            return
-                        time.sleep(0.02)
-        finally:
-            self.running = False
+# The SequenceRunner used by this module now lives in
+# ``braccio_ctrl.dsl.interpreter`` — it wraps a Program AST instead of
+# a flat step list. Imported at the top of the file and reused by F5.

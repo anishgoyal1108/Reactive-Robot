@@ -166,6 +166,52 @@ body,
   margin-top: 4px;
 }
 
+.recorder-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #252a33;
+}
+
+.recorder-panel__row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.recorder-panel__row button {
+  background: #1f2937;
+  color: #e6e6e6;
+  border: 1px solid #374151;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.recorder-panel__row button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.recorder-panel__row button:hover:not(:disabled) {
+  background: #2b3442;
+}
+
+.recorder-panel__status {
+  font-size: 12px;
+  color: #d1d5db;
+  font-variant-numeric: tabular-nums;
+}
+
+.recorder-panel__error {
+  color: #ef4444;
+  font-size: 12px;
+}
+
 .app-shell__viewer {
   grid-area: viewer;
   position: relative;

@@ -18,6 +18,7 @@ import { startTelemetry, useTelemetryStore } from "./state/telemetry";
 import { BlocklyEditor } from "./editor/BlocklyEditor";
 import { RunControls } from "./editor/RunControls";
 import { ManualJointPanel } from "./editor/ManualJointPanel";
+import { RecorderPanel } from "./recorder/RecorderPanel";
 import { api } from "./state/api";
 
 export function App() {
@@ -110,6 +111,8 @@ export function App() {
         </div>
 
         <ManualJointPanel onStateSaved={() => void refreshSavedStates()} />
+
+        <RecorderPanel filenamePrefix="braccio_demo" />
       </aside>
     </div>
   );

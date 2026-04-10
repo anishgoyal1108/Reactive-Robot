@@ -58,7 +58,7 @@ class PersistentObstacleMemory:
         if points is None or len(points) == 0:
             return
         with self._lock:
-            hits: dict[tuple, int] = defaultdict(int)
+            hits: defaultdict[tuple[int, int, int], int] = defaultdict(int)
             for p in points:
                 k = self._key(float(p[0]), float(p[1]), float(p[2]))
                 hits[k] += 1
@@ -99,7 +99,7 @@ class PersistentObstacleMemory:
                         cx = (ix + 0.5) * self._cell
                         cy = (iy + 0.5) * self._cell
                         cz = (iz + 0.5) * self._cell
-                        if ((cx - x) ** 2 + (cy - y) ** 2 + (cz - z) ** 2) <= (rr ** 2):
+                        if ((cx - x) ** 2 + (cy - y) ** 2 + (cz - z) ** 2) <= (rr**2):
                             return True
         return False
 
@@ -132,11 +132,11 @@ class PersistentObstacleMemory:
             mx = max(self._conf.values()) if n else 0.0
             occ = sum(1 for c in self._conf.values() if c >= self._occ)
             return {
-                'cell_mm': self._cell,
-                'num_cells': n,
-                'num_occupied_cells': occ,
-                'max_confidence': float(mx),
-                'occupied_threshold': self._occ,
+                "cell_mm": self._cell,
+                "num_cells": n,
+                "num_occupied_cells": occ,
+                "max_confidence": float(mx),
+                "occupied_threshold": self._occ,
             }
 
     def clear(self) -> None:
@@ -147,5 +147,8 @@ class PersistentObstacleMemory:
     def _prune_to_budget(self) -> None:
         if len(self._conf) <= self._max_cells:
             return
-        keep = sorted(self._conf.items(), key=lambda kv: kv[1], reverse=True)[: self._max_cells]
+        # Drop lowest-confidence cells first.
+        keep = sorted(self._conf.items(), key=lambda kv: kv[1], reverse=True)[
+            : self._max_cells
+        ]
         self._conf = dict(keep)

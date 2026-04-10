@@ -37,7 +37,6 @@ import math
 import threading
 import time
 from typing import Optional
-import numpy as np
 
 from .arm_state    import ArmState
 from .serial_bridge import SerialBridge
@@ -45,13 +44,15 @@ from .ik_solver    import solve_ik, polar_to_cartesian, reachability
 from .obstacle_map import ObstacleMap
 from .tof_sensor   import ToFState, ObstacleResponse
 from .protocol     import cmd_set_all, cmd_set_delta
+
 from .constants    import (
     SWEEP_THETA_MIN, SWEEP_THETA_MAX,
     SWEEP_R_DEFAULT, SWEEP_Z_DEFAULT,
     SWEEP_STEP_DEG, SWEEP_TICK_HZ,
     SWEEP_DELTA_NORMAL, SWEEP_DELTA_REPLAN,
     SWEEP_BACK_STEPS, SWEEP_OBSTACLE_MARGIN_DEG,
-    SWEEP_Z_CANDIDATES, SWEEP_COLLISION_RADIUS_MM,
+    SWEEP_Z_CANDIDATES,
+    SWEEP_COLLISION_RADIUS_MM,
     DELTA_MIN, DELTA_MAX,
     R_MIN, R_MAX, Z_MIN, Z_MAX,
 )
@@ -207,54 +208,62 @@ class AutoSweeper:
     # ── Replan (obstacle in primary FOV) ─────────────────────────────────────
 
     def _do_replan(self) -> None:
+        # Always attempt bypass on every tick — no 10-second early-return.
+        # The old code blocked here for _obstacle_wait_timeout_s (10 s),
+        # which prevented Z-axis and theta bypass from being retried.
         with self._state_lock:
-            if self._sweep_state == SweepState.PAUSED_OBSTACLE:
-                # Already replanning — check timeout
-                waited = time.time() - self._obstacle_wait_start
-                if waited < self._obstacle_wait_timeout_s:
-                    return   # still waiting
-                # Timeout: attempt to skip anyway
+            if self._sweep_state != SweepState.PAUSED_OBSTACLE:
+                self._obstacle_wait_start = time.time()
             self._sweep_state = SweepState.PAUSED_OBSTACLE
-            self._obstacle_wait_start = time.time()
 
         # Slow down for smooth deceleration / replanning
         self._send_delta(self.delta_replan)
 
-        # Query forbidden theta band from obstacle map
+        with self._state_lock:
+            cur_theta = self._current_theta
+
+        # ── Step 1: theta bypass (horizontal avoidance) ───────────────────────
+        # Merge rolling cloud + persistent memory for a complete obstacle picture
         forbidden = self._obstacle_map.get_obstacle_thetas(
             self.sweep_r, self.sweep_z
         )
+        mem_thetas = self._obstacle_map.memory_occupied_thetas(
+            self.sweep_r, self.sweep_z
+        )
+        forbidden.extend(mem_thetas)
 
-        # Also include Kalman estimate of out-of-FOV obstacle
+        # Include Kalman estimate of obstacle that left the sensor FOV
         est = self._obstacle_map.estimate_lost_obstacle()
         if est is not None:
             est_theta = math.degrees(math.atan2(est[1], est[0]))
             est_theta = max(0.0, min(180.0, est_theta))
             forbidden.append(est_theta)
 
-        bypass = self._compute_bypass_theta(forbidden)
+        bypass_theta = self._compute_bypass_theta(forbidden)
 
-        if bypass is not None and self._is_position_clear(bypass, self.sweep_z):
+        if bypass_theta is not None:
             with self._state_lock:
-                self._bypass_theta    = bypass
-                self._current_theta   = bypass
-                self._sweep_state     = SweepState.RUNNING
-            self._send_move(bypass)
+                self._bypass_theta  = bypass_theta
+                self._current_theta = bypass_theta
+                self._sweep_state   = SweepState.RUNNING
+            self._send_move(bypass_theta)
             self._send_delta(self.delta_normal)
             return
 
-        # Horizontal bypass failed or is still blocked; try higher/lower sweep Z.
-        new_z = self._find_clear_z(self._current_theta)
+        # ── Step 2: Z-axis avoidance (go over or under the obstacle) ─────────
+        # Retried every tick so the arm reacts as soon as a Z level clears.
+        new_z = self._find_clear_z(cur_theta)
         if new_z is not None:
             with self._state_lock:
-                self.sweep_z = new_z
+                self.sweep_z       = new_z
                 self._bypass_theta = None
-                self._sweep_state = SweepState.RUNNING
-            self._send_move(self._current_theta)
+                self._sweep_state  = SweepState.RUNNING
+            self._send_move(cur_theta, z=new_z)
             self._send_delta(self.delta_normal)
-        else:
-            # No bypass available — hold position, wait for obstacle to clear
-            pass   # will retry on next tick until timeout
+            return
+
+        # ── Step 3: hold position — obstacle spans all options ────────────────
+        # Will keep retrying steps 1 + 2 on every tick until clear.
 
     # ── Back away (IR DANGER / CLOSE) ────────────────────────────────────────
 
@@ -313,46 +322,23 @@ class AutoSweeper:
 
         return round(candidate, 1)
 
-    def _is_position_clear(self, theta: float, z: float) -> bool:
-        """Return True if no obstacle point is within collision radius."""
-        x, y = polar_to_cartesian(theta, self.sweep_r)
-        p = (x, y, z)
-        if self._obstacle_map.memory_occupied_near(p, SWEEP_COLLISION_RADIUS_MM):
-            return False
-        pts = self._obstacle_map.all_points()
-        if pts.size == 0:
-            return True
-        dx = pts[:, 0] - p[0]
-        dy = pts[:, 1] - p[1]
-        dz = pts[:, 2] - p[2]
-        d2 = dx * dx + dy * dy + dz * dz
-        return bool(np.all(d2 >= (SWEEP_COLLISION_RADIUS_MM ** 2)))
-
-    def _find_clear_z(self, theta: float) -> Optional[float]:
-        """
-        Find a reachable, obstacle-clear z candidate for current sweep_r/theta.
-        """
-        for z in SWEEP_Z_CANDIDATES:
-            if z < Z_MIN or z > Z_MAX:
-                continue
-            if reachability(theta, self.sweep_r, z) != 'ok':
-                continue
-            if self._is_position_clear(theta, z):
-                return float(z)
-        return None
-
     # ── Command helpers ───────────────────────────────────────────────────────
 
-    def _send_move(self, theta: float) -> None:
-        """Compute IK for (theta, sweep_r, sweep_z) and send SET ALL."""
-        if not self._is_position_clear(theta, self.sweep_z):
-            with self._state_lock:
-                self._sweep_state = SweepState.PAUSED_OBSTACLE
-            return
-        x, y = polar_to_cartesian(theta, self.sweep_r)
-        result = solve_ik(x, y, self.sweep_z)
+    def _send_move(self, theta: float, z: float = None) -> bool:
+        """
+        Compute IK for (theta, sweep_r, z) and send SET ALL.
+        Returns True if command was sent, False if blocked by collision check.
+        z defaults to self.sweep_z if omitted.
+        """
+        z = z if z is not None else self.sweep_z
+
+        if not self._is_position_clear(theta, z):
+            return False
+
+        x, y   = polar_to_cartesian(theta, self.sweep_r)
+        result = solve_ik(x, y, z)
         if result is None:
-            return   # unreachable — skip this step
+            return False   # kinematically unreachable — skip this step
 
         with self._arm_state._lock:
             wrist_offset = self._arm_state.wrist_offset
@@ -360,8 +346,7 @@ class AutoSweeper:
             gripper      = self._arm_state.gripper
             self._arm_state.theta = theta
             self._arm_state.r     = self.sweep_r
-            self._arm_state.z     = self.sweep_z
-
+            self._arm_state.z     = z
         self._arm_state.update_joints_from_ik(result, wrist_offset,
                                                wrist_rot, gripper)
         positions = self._arm_state.snapshot()['joints']
@@ -369,6 +354,7 @@ class AutoSweeper:
         with self._arm_state._lock:
             self._arm_state.last_cmd = cmd.strip()
         self._bridge.send_cmd(cmd)
+        return True
 
     def _send_delta(self, delta: int) -> None:
         """Send SET DELTA command and update arm state."""

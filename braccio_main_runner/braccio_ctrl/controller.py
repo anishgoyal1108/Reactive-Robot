@@ -45,6 +45,7 @@ from .constants import (
     JOINT_WRIST_ROT, JOINT_GRIPPER,
     R_MIN, R_MAX, Z_MIN, Z_MAX,
     BAUD_RATE, TOF_NUM_CHANNELS, TOF_BAUD_RATE, TOF_THRESHOLD_MM, TOF_THRESHOLDS_MM,
+    SENSOR_IGNORE_CHANNELS,
 )
 
 
@@ -70,15 +71,13 @@ class BraccioController:
 
         # ── ToF / IR subsystem ────────────────────────────────────────────
         self._tof_state  = ToFState(num_channels=TOF_NUM_CHANNELS)
-        self._tof_state.tof_threshold_mm = TOF_THRESHOLDS_MM[0]
-        self._tof_state.tof_thresholds_mm = list(TOF_THRESHOLDS_MM)
         self._imu_state  = IMUState()
         self._tof_bridge = ToFBridge(self._tof_state, self._imu_state)
         self._teensy_port = teensy_port
         self._teensy_baud = teensy_baud
 
         # ── Obstacle map + autonomous sweep ──────────────────────────────
-        self._obstacle_map = ObstacleMap(threshold_mm=TOF_THRESHOLD_MM)
+        self._obstacle_map = ObstacleMap(thresholds_mm=TOF_THRESHOLDS_MM)
         self._sweeper = AutoSweeper(
             arm_state=self._state,
             bridge=self._bridge,
@@ -228,10 +227,16 @@ class BraccioController:
                     f"ToF failed to detect, IR is second line of defense"
                 )
             elif response == ObstacleResponse.REPLAN:
-                ch_thr = snap.get('tof_threshold_mm', TOF_THRESHOLD_MM)
+                ch_idx = -1
+                try:
+                    ch_idx = int(source.replace('tof_ch', ''))
+                except (ValueError, AttributeError):
+                    pass
+                thresholds = snap.get('tof_thresholds_mm', TOF_THRESHOLDS_MM)
+                ch_thresh = thresholds[ch_idx] if 0 <= ch_idx < len(thresholds) else '?'
                 self._state.last_error = (
                     f"ToF: obstacle at {dist:.0f} mm "
-                    f"(threshold={ch_thr:.0f} mm, "
+                    f"(ch{ch_idx} threshold={ch_thresh:.0f} mm, "
                     f"src={source}) — REPLAN TRAJECTORY"
                 )
             else:
@@ -264,10 +269,13 @@ class BraccioController:
         arm at a known orientation (e.g. theta=90, arm pointing forward).
         """
         self._imu_state.record_calibration()
+        # World frame changed — clear persistent obstacle memory
+        self._obstacle_map.clear_memory()
         with self._state._lock:
             self._state.last_resp = (
                 f"IMU calibrated: yaw_ref="
                 f"{self._imu_state.yaw_calibration_offset:.1f}°"
+                f" (obstacle memory cleared)"
             )
             self._state.last_error = ""
 
@@ -284,17 +292,17 @@ class BraccioController:
             rtype = resp.get('type', 'unknown')
             with self._state._lock:
                 if rtype == 'pos':
-                    # Sync joint shadow from Arduino's actual commanded angles
+                    # Sync joints AND IK polar state from Arduino's actual angles.
+                    # Without this, the first keypress after startup computes IK
+                    # from the stale software default (r=152, z=-50) rather than
+                    # the arm's real position, causing a violent unexpected move.
                     positions = list(resp['positions'])
+                    theta, r, z = fk_polar(positions)
                     self._state.joints = positions
-                    try:
-                        theta, r, z = fk_polar(positions)
-                        self._state.theta = theta
-                        self._state.r = r
-                        self._state.z = z
-                    except Exception:
-                        pass
-                    self._state.last_resp = "POS synced"
+                    self._state.theta  = theta
+                    self._state.r      = r
+                    self._state.z      = z
+                    self._state.last_resp  = "POS synced"
                     self._state.last_error = ""
                 elif rtype == 'error':
                     self._state.last_error = resp.get('message', '')
@@ -324,6 +332,61 @@ class BraccioController:
             return
         if action == 'seq_editor':
             self._open_seq_editor()
+            return
+        if action == 'plot_main_toggle':
+            if self._plotter is not None:
+                self._plotter.toggle_main()
+            return
+        if action.startswith('plot_joint_') and action.endswith('_toggle'):
+            if self._plotter is not None:
+                idx = int(action[len('plot_joint_')]) - 1
+                self._plotter.toggle_joint(idx)
+            return
+        if action == 'plot_reset':
+            if self._plotter is not None:
+                self._plotter.reset()
+            return
+        if action == 'plot_screenshot':
+            if self._plotter is not None:
+                self._plotter.save_screenshot()
+            return
+        if action == 'plot_log_toggle':
+            if self._plotter is not None:
+                self._plotter.toggle_logging()
+            return
+        # ── ToF / IR actions ──────────────────────────────────────────────
+        if action == 'tof_view_toggle':
+            if self._tof_plotter is not None:
+                self._tof_plotter.toggle_main()
+            return
+        if action == 'tof_export_csv':
+            if self._tof_plotter is not None:
+                path = self._tof_plotter.export_csv_snapshot()
+                with self._state._lock:
+                    self._state.last_resp = f"ToF CSV → {path}"
+            return
+        if action == 'tof_screenshot':
+            if self._tof_plotter is not None:
+                self._tof_plotter.save_screenshot()
+            return
+        if action == 'tof_log_toggle':
+            if self._tof_plotter is not None:
+                self._tof_plotter.toggle_logging()
+            return
+        if action == 'tof_threshold_inc':
+            # Adjust primary (side) channel thresholds only
+            with self._tof_state._lock:
+                for ch in range(len(self._tof_state.tof_thresholds_mm)):
+                    if ch not in SENSOR_IGNORE_CHANNELS:
+                        self._tof_state.tof_thresholds_mm[ch] = min(
+                            3000.0, self._tof_state.tof_thresholds_mm[ch] + 50.0)
+            return
+        if action == 'tof_threshold_dec':
+            with self._tof_state._lock:
+                for ch in range(len(self._tof_state.tof_thresholds_mm)):
+                    if ch not in SENSOR_IGNORE_CHANNELS:
+                        self._tof_state.tof_thresholds_mm[ch] = max(
+                            50.0, self._tof_state.tof_thresholds_mm[ch] - 50.0)
             return
         # ── Autonomous sweep ──────────────────────────────────────────────
         if action == 'sweep_toggle':

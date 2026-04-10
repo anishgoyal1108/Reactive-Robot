@@ -12,7 +12,7 @@ horizontal by default; a caller-supplied offset allows manual tilt.
 """
 
 import math
-from .constants import L1, L2, L3, JOINT_LIMITS
+from .constants import L1, L2, L3, JOINT_LIMITS, R_MIN
 
 
 class IKResult:
@@ -119,6 +119,63 @@ def apply_wrist_offset(base_wrist_deg: float, offset_deg: float) -> int:
     """
     w_lo, w_hi = JOINT_LIMITS[3]
     return int(round(max(w_lo, min(w_hi, base_wrist_deg + offset_deg))))
+
+
+def fk_polar(joints: list) -> tuple:
+    """
+    Forward kinematics: joint servo angles → IK polar state (theta, r, z).
+
+    This is the exact inverse of solve_ik() / polar_to_cartesian().
+    Used to sync the software IK state from the arm's actual joint positions
+    so the first commanded move after startup is a delta from where the arm
+    really is, not from a stale software default.
+
+    Parameters
+    ----------
+    joints : 6-element list [Base, Shoulder, Elbow, WristV, WristR, Gripper]
+             (degrees, as reported by the Arduino)
+
+    Returns
+    -------
+    (theta_deg, r_mm, z_mm) — the polar coordinates that solve_ik() would
+    have needed to produce these Base/Shoulder/Elbow angles.
+    """
+    base_deg     = float(joints[0])
+    shoulder_deg = float(joints[1])
+    elbow_deg    = float(joints[2])
+
+    theta = base_deg
+
+    # Distance from shoulder pivot to wrist pivot (law of cosines).
+    # The interior elbow angle in the kinematic triangle equals elbow_deg.
+    E_rad = math.radians(elbow_deg)
+    dist2 = L1 ** 2 + L2 ** 2 - 2.0 * L1 * L2 * math.cos(E_rad)
+    dist  = math.sqrt(max(0.0, dist2))
+
+    if dist < 1e-3:
+        # Fully folded arm — return a safe near-origin value
+        return theta, L3 + 1.0, 0.0
+
+    # Beta: angle at the shoulder vertex of the kinematic triangle.
+    # Matches the cos_beta used in solve_ik().
+    cos_beta = (dist2 + L1 ** 2 - L2 ** 2) / (2.0 * dist * L1)
+    cos_beta = max(-1.0, min(1.0, cos_beta))
+    beta_deg = math.degrees(math.acos(cos_beta))
+
+    # Alpha: elevation angle of the wrist-pivot target from horizontal.
+    # In solve_ik(): shoulder = alpha + beta  →  alpha = shoulder - beta
+    alpha_deg = shoulder_deg - beta_deg
+    alpha_rad = math.radians(alpha_deg)
+
+    # Horizontal and vertical components of the shoulder→wrist vector
+    r_eff = dist * math.cos(alpha_rad)   # effective reach (to wrist pivot)
+    z     = dist * math.sin(alpha_rad)   # height (signed: negative = below pivot)
+
+    # Add gripper length back to get the tip reach
+    r = r_eff + L3
+
+    r = max(R_MIN, r)   # keep within IK reach envelope
+    return theta, r, z
 
 
 def reachability(theta_deg: float, r_mm: float, z_mm: float) -> str:

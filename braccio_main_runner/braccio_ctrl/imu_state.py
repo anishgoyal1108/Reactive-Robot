@@ -55,6 +55,13 @@ class IMUState:
         self._rot_cache: np.ndarray | None = None
         self._rot_cache_key: tuple | None = None
 
+        # ── Rotation matrix cache ─────────────────────────────────────────────
+        # Recomputed only when roll/pitch/yaw actually changes.
+        self._cached_R:     np.ndarray = None
+        self._cached_roll:  float = None
+        self._cached_pitch: float = None
+        self._cached_yaw:   float = None   # calibrated yaw at last compute
+
     # ── Public interface ──────────────────────────────────────────────────────
 
     def update(self, roll: float, pitch: float, yaw: float,
@@ -102,24 +109,23 @@ class IMUState:
         Compute a 3×3 rotation matrix from roll/pitch/yaw (ZYX convention).
 
         Used by ObstacleMap to rotate sensor-frame points into the world frame.
-        Only the yaw component is strictly necessary for the horizontal sweep
-        (roll/pitch are small for a table-mounted arm), but all three are
-        included for correctness.
+        Result is cached and only recomputed when orientation values change,
+        avoiding redundant trig calls on every main-loop tick.
         """
         with self._lock:
-            roll = self.roll_deg
-            pitch = self.pitch_deg
-            # Use calibrated yaw for world-frame projection
-            if self.calibrated:
-                yaw = self.yaw_relative()
-            else:
-                yaw = self.yaw_deg
-            key = (round(roll, 6), round(pitch, 6), round(yaw, 6), self.calibrated)
-            if self._rot_cache is not None and self._rot_cache_key == key:
-                return self._rot_cache.copy()
+            yaw = self.yaw_relative() if self.calibrated else self.yaw_deg
+            # Return cached matrix if orientation is unchanged
+            if (self._cached_R is not None
+                    and self.roll_deg  == self._cached_roll
+                    and self.pitch_deg == self._cached_pitch
+                    and yaw            == self._cached_yaw):
+                return self._cached_R.copy()
+            roll_deg  = self.roll_deg
+            pitch_deg = self.pitch_deg
 
-        r = math.radians(roll)
-        p = math.radians(pitch)
+        # Compute outside the lock — pure math, no shared state reads
+        r = math.radians(roll_deg)
+        p = math.radians(pitch_deg)
         y = math.radians(yaw)
 
         cr, sr = math.cos(r), math.sin(r)
@@ -127,15 +133,17 @@ class IMUState:
         cy, sy = math.cos(y), math.sin(y)
 
         # ZYX (yaw → pitch → roll)
-        R = np.array([
+        result = np.array([
             [cy*cp,  cy*sp*sr - sy*cr,  cy*sp*cr + sy*sr],
             [sy*cp,  sy*sp*sr + cy*cr,  sy*sp*cr - cy*sr],
             [  -sp,            cp*sr,             cp*cr  ],
         ], dtype=np.float64)
         with self._lock:
-            self._rot_cache = R
-            self._rot_cache_key = key
-        return R.copy()
+            self._cached_R     = result
+            self._cached_roll  = roll_deg
+            self._cached_pitch = pitch_deg
+            self._cached_yaw   = yaw
+        return result.copy()
 
     def snapshot(self) -> dict:
         """Return a copy of all display-relevant IMU state."""

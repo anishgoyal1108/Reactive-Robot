@@ -17,12 +17,16 @@ Replanning strategy
 -------------------
 When a REPLAN response is received the sweeper:
   1. Slows the arm (increases SET DELTA) for smoother deceleration.
-  2. Queries ObstacleMap.get_obstacle_thetas() to find the occupied theta band.
-  3. Computes a bypass theta just past the far edge of the obstacle + margin.
-  4. Jumps the sweep target to the bypass theta so the arm arcs around the
-     obstacle, then restores normal speed.
-  5. If no bypass is possible (obstacle spans the whole sweep range) the arm
-     waits in place until the obstacle clears.
+  2. Reverses sweep direction and retreats by SWEEP_RETREAT_DEG. The retreat
+     must exceed the ToF half-FOV so the on-arm sensor actually rotates off
+     the obstacle; jumping forward past the obstacle would just move the
+     sensor cone closer to it.
+  3. Commits the reversal and returns. The clear-branch in _sweep_loop then
+     resets the commit on the first tick the obstacle clears, and normal
+     sweeping resumes in the new direction.
+  4. Tertiary fallback: if the arm is pinned against a sweep limit and the
+     retreat delta is too small to matter, try a Z-axis hop (go over or
+     under) after a short hold. If that also fails, hold position.
 
 Kalman estimation
 -----------------
@@ -39,9 +43,10 @@ import time
 from typing import Optional
 
 from .arm_state    import ArmState
-from .serial_bridge import SerialBridge
-from .ik_solver    import solve_ik, polar_to_cartesian, reachability
+from .backends     import BraccioBackend
+from .ik_solver    import solve_ik, polar_to_cartesian
 from .obstacle_map import ObstacleMap
+from .motion_guard import MotionGuard
 from .tof_sensor   import ToFState, ObstacleResponse
 from .protocol     import cmd_set_all, cmd_set_delta
 
@@ -51,10 +56,10 @@ from .constants    import (
     SWEEP_STEP_DEG, SWEEP_TICK_HZ,
     SWEEP_DELTA_NORMAL, SWEEP_DELTA_REPLAN,
     SWEEP_BACK_STEPS, SWEEP_OBSTACLE_MARGIN_DEG,
-    SWEEP_Z_CANDIDATES,
-    SWEEP_COLLISION_RADIUS_MM,
+    SWEEP_RETREAT_DEG,
+    SWEEP_MIN_CMD_INTERVAL_S,
+    SWEEP_MIN_DELTA_DEG,
     DELTA_MIN, DELTA_MAX,
-    R_MIN, R_MAX, Z_MIN, Z_MAX,
 )
 
 
@@ -68,25 +73,28 @@ class SweepState(enum.Enum):
 class AutoSweeper:
     """
     Daemon-thread sweep controller.  Must be constructed after the
-    SerialBridge and ArmState are ready.
+    backend and ArmState are ready.
 
     Parameters
     ----------
     arm_state   : shared ArmState (read + written under its lock)
-    bridge      : SerialBridge for sending SET ALL / SET DELTA commands
+    bridge      : BraccioBackend for sending SET ALL / SET DELTA commands
+                  (hardware SerialBridge or SimBackend — same interface)
     tof_state   : ToFState for obstacle response polling
     obstacle_map: ObstacleMap for world-frame forbidden zone queries
     """
 
     def __init__(self,
                  arm_state:    ArmState,
-                 bridge:       SerialBridge,
+                 bridge:       BraccioBackend,
                  tof_state:    ToFState,
-                 obstacle_map: ObstacleMap):
+                 obstacle_map: ObstacleMap,
+                 guard:        MotionGuard):
         self._arm_state    = arm_state
         self._bridge       = bridge
         self._tof_state    = tof_state
         self._obstacle_map = obstacle_map
+        self._guard        = guard
 
         # ── Configurable sweep parameters ────────────────────────────────────
         self.sweep_r:           float = SWEEP_R_DEFAULT
@@ -106,10 +114,30 @@ class AutoSweeper:
         self._obstacle_wait_start: float = 0.0
         self._obstacle_wait_timeout_s: float = 10.0  # max wait before skipping
 
+        # Replan commit state: once we pick a plan (bypass theta OR Z hop OR
+        # "hold position"), we stick with it until the obstacle actually
+        # clears. Without this, _do_replan re-ran every 100 ms and produced
+        # a fresh plan each tick — the arm oscillated between z=55 and z=80
+        # at 10 Hz, which is what caused the physical jitter.
+        self._replan_committed: bool = False
+        self._replan_enter_time: float = 0.0
+        # How long to hold position before attempting a Z-axis bypass.
+        # Theta bypass is still tried immediately on entry.
+        self._replan_hold_before_z_s: float = 2.0
+
         # ── Thread control ────────────────────────────────────────────────────
         self._stop  = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._state_lock = threading.Lock()   # protects sweep runtime state
+
+        # ── Command rate-limiting state ──────────────────────────────────────
+        # Track when the last SET ALL was actually flushed and what joint
+        # positions it asked for. _send_move skips commands that arrive too
+        # soon after the previous one unless they move a joint by more than
+        # SWEEP_MIN_DELTA_DEG. Keeps the serial link from being flooded when
+        # a sensor reading flaps every tick.
+        self._last_cmd_time: float = 0.0
+        self._last_cmd_positions: Optional[list] = None
 
     # ── Public control interface ──────────────────────────────────────────────
 
@@ -172,12 +200,18 @@ class AutoSweeper:
             elif obs_response == ObstacleResponse.REPLAN:
                 self._do_replan()
             else:
+                # Obstacle cleared — resume normal sweep and throw away any
+                # committed replan so a fresh obstacle triggers a fresh plan.
+                resumed = False
                 with self._state_lock:
                     if self._sweep_state in (SweepState.PAUSED_OBSTACLE,
                                              SweepState.BACK_AWAY):
-                        # Obstacle cleared — resume normal sweep
                         self._sweep_state = SweepState.RUNNING
-                        self._send_delta(self.delta_normal)
+                        self._replan_committed = False
+                        self._bypass_theta = None
+                        resumed = True
+                if resumed:
+                    self._send_delta(self.delta_normal)
                 self._do_step()
 
             elapsed = time.monotonic() - t0
@@ -208,62 +242,92 @@ class AutoSweeper:
     # ── Replan (obstacle in primary FOV) ─────────────────────────────────────
 
     def _do_replan(self) -> None:
-        # Always attempt bypass on every tick — no 10-second early-return.
-        # The old code blocked here for _obstacle_wait_timeout_s (10 s),
-        # which prevented Z-axis and theta bypass from being retried.
+        """
+        On a fresh REPLAN entry: reverse sweep direction and retreat by
+        SWEEP_RETREAT_DEG. Then commit — the tick loop resumes normal
+        stepping in the new direction, which naturally carries the arm
+        (and the on-arm ToF sensor) AWAY from the obstacle.
+
+        Why reverse-and-retreat instead of "jump past the obstacle":
+        the primary ToF sensors are mounted on the end-effector and
+        rotate with the arm. Jumping 15° forward past a detected hand
+        moves the sensor *closer* to that hand, not farther — the arm
+        ends up staring at the obstacle from a slightly worse angle.
+        Retreating > FOV/2 = 22.5° rotates the sensor cone off the
+        obstacle entirely. As soon as the sensor clears, the clear
+        branch in _sweep_loop resets committed and the arm continues
+        sweeping in the new direction.
+
+        Tertiary fallback (Z hop) is kept for the edge case where the
+        arm is jammed up against a sweep limit and cannot retreat.
+        """
         with self._state_lock:
-            if self._sweep_state != SweepState.PAUSED_OBSTACLE:
-                self._obstacle_wait_start = time.time()
+            is_fresh_entry = self._sweep_state != SweepState.PAUSED_OBSTACLE
             self._sweep_state = SweepState.PAUSED_OBSTACLE
-
-        # Slow down for smooth deceleration / replanning
-        self._send_delta(self.delta_replan)
-
-        with self._state_lock:
+            if is_fresh_entry:
+                self._replan_enter_time = time.time()
+                self._replan_committed = False
+                self._bypass_theta = None
+                self._obstacle_wait_start = time.time()
+            committed = self._replan_committed
             cur_theta = self._current_theta
+            cur_direction = self._direction
+            cur_z = self.sweep_z
 
-        # ── Step 1: theta bypass (horizontal avoidance) ───────────────────────
-        # Merge rolling cloud + persistent memory for a complete obstacle picture
-        forbidden = self._obstacle_map.get_obstacle_thetas(
-            self.sweep_r, self.sweep_z
-        )
-        mem_thetas = self._obstacle_map.memory_occupied_thetas(
-            self.sweep_r, self.sweep_z
-        )
-        forbidden.extend(mem_thetas)
+        # Slow the arm ONCE on entry — sending SET DELTA every tick was
+        # also contributing to serial-bus noise.
+        if is_fresh_entry:
+            self._send_delta(self.delta_replan)
 
-        # Include Kalman estimate of obstacle that left the sensor FOV
-        est = self._obstacle_map.estimate_lost_obstacle()
-        if est is not None:
-            est_theta = math.degrees(math.atan2(est[1], est[0]))
-            est_theta = max(0.0, min(180.0, est_theta))
-            forbidden.append(est_theta)
-
-        bypass_theta = self._compute_bypass_theta(forbidden)
-
-        if bypass_theta is not None:
-            with self._state_lock:
-                self._bypass_theta  = bypass_theta
-                self._current_theta = bypass_theta
-                self._sweep_state   = SweepState.RUNNING
-            self._send_move(bypass_theta)
-            self._send_delta(self.delta_normal)
+        # Plan already committed and we're waiting for the obstacle to
+        # clear (or for the Z-hop grace period to expire, handled below).
+        if committed:
             return
 
-        # ── Step 2: Z-axis avoidance (go over or under the obstacle) ─────────
-        # Retried every tick so the arm reacts as soon as a Z level clears.
-        new_z = self._find_clear_z(cur_theta)
+        # ── Step 1: reverse-and-retreat (primary strategy) ───────────────────
+        new_direction = -cur_direction
+        retreat_target = cur_theta + new_direction * SWEEP_RETREAT_DEG
+        retreat_target = max(
+            self.sweep_theta_min,
+            min(self.sweep_theta_max, retreat_target),
+        )
+        retreat_delta = abs(retreat_target - cur_theta)
+
+        # If we have headroom to actually move, commit the reversal now.
+        # The retreat delta must be larger than one normal step to count
+        # as progress; otherwise we're pinned against a sweep limit and
+        # need to fall through to the Z-hop fallback.
+        if retreat_delta >= max(2.0, self.step_deg):
+            with self._state_lock:
+                self._direction       = new_direction
+                self._current_theta   = retreat_target
+                self._bypass_theta    = retreat_target
+                self._replan_committed = True
+            self._send_move(retreat_target, z=cur_z)
+            return
+
+        # ── Step 2: Z-axis hop (tertiary fallback) ───────────────────────────
+        # Reached here only when cur_theta is already at (or within one
+        # step of) the sweep limit on the retreat side — reversing can't
+        # create meaningful separation. Try going over/under the obstacle
+        # after a short hold so a transient reading doesn't trigger a hop.
+        if (time.time() - self._replan_enter_time) < self._replan_hold_before_z_s:
+            return   # hold position, try again on a later tick
+
+        new_z = self._guard.find_clear_z(cur_theta, self.sweep_r, cur_z)
         if new_z is not None:
             with self._state_lock:
-                self.sweep_z       = new_z
-                self._bypass_theta = None
-                self._sweep_state  = SweepState.RUNNING
+                self.sweep_z           = new_z
+                self._bypass_theta     = None
+                self._replan_committed = True
             self._send_move(cur_theta, z=new_z)
-            self._send_delta(self.delta_normal)
             return
 
-        # ── Step 3: hold position — obstacle spans all options ────────────────
-        # Will keep retrying steps 1 + 2 on every tick until clear.
+        # ── Step 3: no plan exists — commit to holding position ──────────────
+        # Pinned against a limit, no Z hop available. Hold until the clear
+        # branch in _sweep_loop resets committed and resumes the sweep.
+        with self._state_lock:
+            self._replan_committed = True
 
     # ── Back away (IR DANGER / CLOSE) ────────────────────────────────────────
 
@@ -327,12 +391,13 @@ class AutoSweeper:
     def _send_move(self, theta: float, z: float = None) -> bool:
         """
         Compute IK for (theta, sweep_r, z) and send SET ALL.
-        Returns True if command was sent, False if blocked by collision check.
+        Returns True if command was sent, False if blocked by collision check
+        or suppressed by the rate limiter.
         z defaults to self.sweep_z if omitted.
         """
         z = z if z is not None else self.sweep_z
 
-        if not self._is_position_clear(theta, z):
+        if not self._guard.is_clear(theta, self.sweep_r, z):
             return False
 
         x, y   = polar_to_cartesian(theta, self.sweep_r)
@@ -350,10 +415,27 @@ class AutoSweeper:
         self._arm_state.update_joints_from_ik(result, wrist_offset,
                                                wrist_rot, gripper)
         positions = self._arm_state.snapshot()['joints']
+
+        # Rate-limit: if this command is both too recent AND numerically
+        # close to the previous one, skip sending it. We apply the limiter
+        # AFTER updating local state so the shadow tracks what the sweeper
+        # *intended*; the serial bus just doesn't see a fresh packet.
+        now = time.monotonic()
+        if self._last_cmd_positions is not None:
+            dt = now - self._last_cmd_time
+            max_delta = max(
+                abs(a - b)
+                for a, b in zip(positions, self._last_cmd_positions)
+            )
+            if dt < SWEEP_MIN_CMD_INTERVAL_S and max_delta < SWEEP_MIN_DELTA_DEG:
+                return False
+
         cmd = cmd_set_all(positions)
         with self._arm_state._lock:
             self._arm_state.last_cmd = cmd.strip()
         self._bridge.send_cmd(cmd)
+        self._last_cmd_time = now
+        self._last_cmd_positions = list(positions)
         return True
 
     def _send_delta(self, delta: int) -> None:

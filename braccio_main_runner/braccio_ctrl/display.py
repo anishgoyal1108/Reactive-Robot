@@ -258,12 +258,18 @@ class CursesDisplay:
         if row < h - 1:
             ir_label = tof.get("ir_label", "?")
             ir_bits = tof.get("ir_bits", 0)
-            line = f"  IR (OUT1D): {ir_bits:02b} = {ir_label}"
-            attr = curses.color_pair(_C_DIM)
-            if ir_bits >= 2:
-                attr = curses.color_pair(_C_ERR) | curses.A_BOLD
-            elif ir_bits == 1:
-                attr = curses.color_pair(_C_WARN)
+            ir_enabled = tof.get("ir_enabled", True)
+            if not ir_enabled:
+                raw = tof.get("ir_bits_raw", 0)
+                line = f"  IR (OUT1D): DISABLED  (raw={raw:02b})"
+                attr = curses.color_pair(_C_DIM)
+            else:
+                line = f"  IR (OUT1D): {ir_bits:02b} = {ir_label}"
+                attr = curses.color_pair(_C_DIM)
+                if ir_bits >= 2:
+                    attr = curses.color_pair(_C_ERR) | curses.A_BOLD
+                elif ir_bits == 1:
+                    attr = curses.color_pair(_C_WARN)
             self._safe_addstr(row, 0, line[: w - 1], attr)
             row += 1
 

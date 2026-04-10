@@ -27,7 +27,7 @@ The arm should:
 **Sensor mounting:**
 - CH0 (front/side): faces the sweep direction — primary obstacle authority
 - CH1 (back/side): opposite side — primary obstacle authority
-- CH2 (top): faces upward — advisory only, no replanning
+- CH2 (top/side): primary obstacle authority — promoted from advisory on 2026-04-10 after a hardware test showed it was silently ignoring a hand held close to the sensor
 - CH3 (bottom): faces ground — completely ignored (floor false positives)
 
 **IR wiring:** All 4 sensors share 5V and GND. Signal pins → Teensy 2, 3, 4, 5. Active LOW with `INPUT_PULLUP`. A count of firing sensors maps to severity: 0=CLEAR, 1=FAR, 2=CLOSE, 3=DANGER.
@@ -68,12 +68,12 @@ ToF_RR_Sensing/arduino/vl5_tca_4x4/
 L1, L2, L3 = 125.0, 125.0, 60.0   # mm
 
 # ToF per-channel thresholds [CH0, CH1, CH2, CH3]
-TOF_THRESHOLDS_MM = [250.0, 250.0, 50.0, 50.0]
+TOF_THRESHOLDS_MM = [250.0, 250.0, 250.0, 50.0]
 
 # Sensor authority
-SENSOR_REPLAN_CHANNELS   = [0, 1]   # trigger REPLAN
-SENSOR_ADVISORY_CHANNELS = [2]      # log only
-SENSOR_IGNORE_CHANNELS   = [3]      # skip entirely
+SENSOR_REPLAN_CHANNELS   = [0, 1, 2]   # trigger REPLAN + gate manual input
+SENSOR_ADVISORY_CHANNELS = []          # reserved; currently empty
+SENSOR_IGNORE_CHANNELS   = [3]         # skip entirely (floor)
 
 # Sweep
 SWEEP_Z_DEFAULT           = 60.0    # mm (raised from -50 to clear floor)

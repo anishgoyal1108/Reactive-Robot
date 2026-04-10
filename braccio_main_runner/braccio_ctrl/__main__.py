@@ -67,6 +67,14 @@ def main() -> None:
         action="store_true",
         help="Disable ToF/IR sensors entirely",
     )
+    parser.add_argument(
+        "--no-ir",
+        action="store_true",
+        help=(
+            "Disable IR sensor integration while keeping ToF active. "
+            "Use this when the IR wiring is loose or producing false positives."
+        ),
+    )
     args = parser.parse_args()
 
     try:
@@ -100,8 +108,9 @@ def main() -> None:
 
     print(f"Connecting to Braccio on {args.port} at {args.baud} baud...")
     if teensy_port:
+        ir_note = "  [IR disabled]" if args.no_ir else ""
         print(
-            f"Connecting to ToF/IR Teensy on {teensy_port} at {args.teensy_baud} baud..."
+            f"Connecting to ToF/IR Teensy on {teensy_port} at {args.teensy_baud} baud...{ir_note}"
         )
     else:
         print("ToF/IR sensors: disabled (pass --teensy-port to enable)")
@@ -114,8 +123,9 @@ def main() -> None:
     ctrl = BraccioController(
         args.port,
         args.baud,
-        teensy_port=str(teensy_port),
+        teensy_port=str(teensy_port) if teensy_port else "",
         teensy_baud=args.teensy_baud,
+        enable_ir=not args.no_ir,
     )
 
     try:

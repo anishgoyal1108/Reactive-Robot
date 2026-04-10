@@ -92,6 +92,8 @@ PLOT_KEY_MAIN_TOGGLE = '0'  # hide/show main combined window
 PLOT_Y_MARGIN_DEG   = 10    # extra degrees above/below joint limits on y-axis
 LOG_DIR        = 'logs'
 SCREENSHOT_DIR = 'screenshots'
+SESSION_LOG_DIR = 'session_logs'   # JSONL telemetry for offline review
+SESSION_LOG_HZ  = 10               # telemetry sample rate (Hz)
 
 # ── Data streaming (UDP to standalone plotter apps) ──────────────────────
 ARM_DATA_PORT  = 9870      # joint-angle packets → arm_plotter_app.py
@@ -102,9 +104,14 @@ TOF_NUM_CHANNELS    = 4        # number of VL53L5CX sensors on MUX
 TOF_DEFAULT_PORT    = '/dev/ttyACM1'   # Teensy port (separate from Braccio)
 TOF_BAUD_RATE       = 115200
 # Per-channel obstacle detection thresholds [CH0, CH1, CH2, CH3] (mm)
-# CH0 (front/side) and CH1 (back/side) are primary authority sensors.
-# CH2 (top) and CH3 (bottom) use a tighter threshold but have lower authority.
-TOF_THRESHOLDS_MM   = [250.0, 250.0, 50.0, 50.0]
+# CH0/CH1/CH2 are primary authority sensors — any reading below the channel's
+# threshold triggers REPLAN and gates manual commands via MotionGuard.
+# CH3 (bottom, ground-facing) is ignored entirely — it always reads the floor.
+# A hardware test on 2026-04-10 showed CH2's old 50mm threshold was too tight:
+# the user's hand held next to CH2 produced readings in the 41-100mm band,
+# most of which were silently filtered out. Matching CH0/CH1 at 250mm catches
+# the full detection range and still leaves ~98% of idle frames above threshold.
+TOF_THRESHOLDS_MM   = [250.0, 250.0, 250.0, 50.0]
 TOF_THRESHOLD_MM    = TOF_THRESHOLDS_MM[0]   # legacy fallback alias
 TOF_UPSAMPLE_N     = 40       # bilinear upsample resolution for plotting
 TOF_SURFACE_EVERY  = 5        # redraw 3D surface every N frames (performance)
@@ -115,22 +122,60 @@ TOF_MAX_RANGE_MM   = 3000.0   # max display range for heatmap colorbar
 # Bits: 00=CLEAR  01=FAR  10=CLOSE  11=DANGER
 IR_LABEL_MAP = {0: 'CLEAR', 1: 'FAR', 2: 'CLOSE', 3: 'DANGER'}
 
+# Debounce counts for IR state transitions. The IR sensors are noisy when
+# wires are loose and can flap every frame — without debouncing each flap
+# becomes a new BACK_AWAY command, causing the arm to jerk in place.
+IR_DEBOUNCE_ON_SAMPLES     = 3        # need N consecutive high samples to trigger
+IR_DEBOUNCE_OFF_SAMPLES    = 5        # need N consecutive clear samples to release
+
+# Minimum hold time (seconds) for an obstacle_response after it fires. Once
+# the arm commits to REPLAN or BACK_AWAY, it holds that decision for at least
+# this long even if the sensor reading flickers clear momentarily. Keeps the
+# arm from oscillating when a ToF reading sits right on the threshold.
+OBSTACLE_HOLD_S            = 0.5
+
 # ── Autonomous sweep config ───────────────────────────────────────────────
 SWEEP_THETA_MIN            = 0.0      # degrees
 SWEEP_THETA_MAX            = 180.0    # degrees
 SWEEP_R_DEFAULT            = 152.0    # mm  (same as DEFAULT_R)
-SWEEP_Z_DEFAULT            = 60.0     # mm above shoulder — high enough to clear table
+SWEEP_Z_DEFAULT            = 35.0     # mm above shoulder — lowered for closer-to-table sweeps
 SWEEP_STEP_DEG             = 2.0      # degrees advanced per tick
 SWEEP_TICK_HZ              = 10.0     # loop rate of the sweep thread (Hz)
-SWEEP_DELTA_NORMAL         = 2        # SET DELTA during normal sweep
-SWEEP_DELTA_REPLAN         = 4        # SET DELTA during replanning (smoother)
+SWEEP_DELTA_NORMAL         = 3        # SET DELTA during normal sweep (higher = smoother)
+SWEEP_DELTA_REPLAN         = 5        # SET DELTA during replanning (max smoothing)
 SWEEP_BACK_STEPS           = 2        # steps to retreat on BACK_AWAY
 SWEEP_OBSTACLE_MARGIN_DEG  = 10.0     # safety margin beyond obstacle edge (deg)
+# Distance (deg) to retreat on a fresh REPLAN entry. Must exceed the ToF
+# half-FOV (OBS_MAP_TOF_FOV_DEG / 2 = 22.5°) so that backing up actually
+# rotates the on-arm sensor FOV off the obstacle instead of just staring
+# at it from a slightly different angle. 30° gives a comfortable margin.
+SWEEP_RETREAT_DEG          = 30.0
+# Command rate limiting — prevents jerk from back-to-back SET ALL commands
+# when obstacle state flaps between clear/replan/back_away.
+SWEEP_MIN_CMD_INTERVAL_S   = 0.12     # minimum seconds between SET ALL commands
+SWEEP_MIN_DELTA_DEG        = 1.0      # minimum joint-delta to send a new command
 # Discrete Z levels (mm) tried during Z-axis replanning, derived from saved states.
 # AutoSweeper searches above current Z first (go over), then below (go under).
-SWEEP_Z_CANDIDATES         = [0.0, 20.0, 55.0, 70.0, 95.0]
+SWEEP_Z_CANDIDATES         = [-20.0, 0.0, 20.0, 55.0, 80.0]
 SWEEP_COLLISION_RADIUS_MM  = 80.0     # pre-command obstacle clearance radius (mm)
 COLLISION_CHECK_RADIUS_MM  = SWEEP_COLLISION_RADIUS_MM   # alias
+
+# ── Motion-guard replan ladder ────────────────────────────────────────────
+# Used by MotionGuard.plan_clear_pose() to find an alternate clear pose
+# when a commanded target (manual IK, saved state, sequence step, HOME)
+# would collide with a known obstacle. Ladder order is: original target,
+# then z-hops at SWEEP_Z_CANDIDATES, then theta nudges, then radial retreat.
+GUARD_PATH_SAMPLES          = 5                                # swept-volume waypoint count
+# Theta nudge steps. Values chosen so the arc distance at r=SWEEP_R_DEFAULT
+# exceeds SWEEP_COLLISION_RADIUS_MM for the larger steps:
+#   arc = 2 * r * sin(Δθ/2)
+#   at r=152: 30°→78.7mm (still inside sphere), 45°→116mm (clear), 60°→152mm.
+# Smaller steps stay for precision when the obstacle sits off the exact target.
+GUARD_THETA_NUDGE_STEPS_DEG = [5.0, 10.0, 20.0, 30.0, 45.0, 60.0]
+# Radial retreat step must exceed SWEEP_COLLISION_RADIUS_MM for the last
+# rung to escape a point obstacle at the original r — 100mm gives a clear
+# 20mm margin beyond the 80mm sphere.
+GUARD_R_RETREAT_STEPS_MM    = [20.0, 40.0, 60.0, 80.0, 100.0]
 
 # ── Obstacle map config ───────────────────────────────────────────────────
 OBS_MAP_MAX_AGE_S          = 2.0     # seconds before stale cloud points are discarded
@@ -152,12 +197,25 @@ SENSOR_MOUNT_BACK_OFFSET   = [-60.0, 0.0,  0.0]
 SENSOR_MOUNT_TOP_OFFSET    = [0.0,   0.0,  30.0]
 SENSOR_MOUNT_BOTTOM_OFFSET = [0.0,   0.0, -30.0]
 
-# Sensor channel authority classification
-# CH0 (front/side) and CH1 (back/side): trigger REPLAN — primary authority
-SENSOR_REPLAN_CHANNELS   = [0, 1]
+# Sensor channel authority classification.
+#
+# REPLAN channels are the authoritative obstacle sensors. Any reading below
+# the channel's threshold triggers `ObstacleResponse.REPLAN`, pauses the
+# autonomous sweep, AND fires the live-sensor gate in MotionGuard so any
+# manual command that isn't an unambiguous retreat is rejected. The persistent
+# voxel memory is populated from every non-ignored channel, so obstacles seen
+# by a REPLAN channel are also remembered for future collision checks.
+#
+# CH3 (bottom, ground-facing) is ignored — it always reads the floor.
+#
+# Historical note: CH2 used to be advisory-only because the "top" sensor was
+# expected to occasionally see the arm's own structure. A 2026-04-10 session
+# log proved otherwise — CH2 readings are overwhelmingly >1m in idle, so
+# promoting it to REPLAN authority is safe and closes a real blind spot that
+# let the arm sweep past the user's hand during manual control.
+SENSOR_REPLAN_CHANNELS   = [0, 1, 2]
 SENSOR_PRIMARY_CHANNELS  = SENSOR_REPLAN_CHANNELS   # alias
-# CH2 (top): advisory only — fires below its own threshold but does not trigger REPLAN
-SENSOR_ADVISORY_CHANNELS = [2]
+SENSOR_ADVISORY_CHANNELS: list[int] = []   # reserved; currently empty
 # CH3 (bottom): ignored — very close to ground, assume sufficient clearance
 SENSOR_IGNORE_CHANNELS   = [3]
 

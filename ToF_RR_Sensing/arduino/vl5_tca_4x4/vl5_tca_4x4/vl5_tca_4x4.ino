@@ -36,7 +36,7 @@ uint32_t imuSeqCounter = 0;
 
 // Four IR obstacle sensors — active LOW (LOW = obstacle detected)
 // Mounted 90° apart around the arm base: front, left, back, right
-const int IR_PINS[]              = {2, 3, 4, 5};
+const int IR_PINS[]              = {23, 22, 21, 20};
 const int IR_NUM                 = 4;
 const unsigned long IR_SEND_INTERVAL_MS = 100;
 unsigned long lastIRSend = 0;

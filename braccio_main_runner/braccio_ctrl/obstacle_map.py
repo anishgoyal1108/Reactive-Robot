@@ -15,8 +15,8 @@ Responsibilities
 Sensor orientation conventions (configurable via constants.py):
   CH0 = front  — primary authority, faces the sweep direction
   CH1 = back   — primary authority, opposite side
-  CH2 = top    — confirmation only
-  CH3 = bottom — confirmation only
+  CH2 = top    — primary authority (promoted 2026-04-10)
+  CH3 = bottom — ignored (floor false positives)
 
 Coordinate system (origin = arm base / shoulder pivot):
   +X  = arm forward at theta = 0

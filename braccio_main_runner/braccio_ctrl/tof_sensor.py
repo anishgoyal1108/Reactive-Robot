@@ -39,6 +39,9 @@ from .constants import (
     SENSOR_REPLAN_CHANNELS,
     SENSOR_ADVISORY_CHANNELS,
     SENSOR_IGNORE_CHANNELS,
+    IR_DEBOUNCE_ON_SAMPLES,
+    IR_DEBOUNCE_OFF_SAMPLES,
+    OBSTACLE_HOLD_S,
 )
 
 if TYPE_CHECKING:
@@ -103,10 +106,18 @@ class ToFState:
         self.hz = [0] * num_channels
 
         # IR state
-        self.ir_bits: int = 0  # raw 2-bit value
+        self.ir_bits: int = 0  # debounced 2-bit value used for decisions
+        self.ir_bits_raw: int = 0  # most recent raw sample (diagnostic)
         self.ir_label: str = "CLEAR"
         self.ir_action: str = ""  # '', 'advisory', 'replan', 'back_away'
         self.ir_last_rx: float = 0.0
+        self.ir_enabled: bool = True  # set False by --no-ir to ignore IR entirely
+        # Debounce counters: count consecutive samples of the same category.
+        # `_ir_pending_bits` is the level being voted on; once it racks up
+        # enough consecutive samples (ON or OFF thresholds), it gets promoted
+        # into `ir_bits`.
+        self._ir_pending_bits: int = 0
+        self._ir_pending_count: int = 0
 
         # Obstacle detection
         self.obstacle_response: str = ObstacleResponse.CLEAR
@@ -114,6 +125,11 @@ class ToFState:
         self.obstacle_dist_mm: float = -1.0  # closest measured distance
         self.tof_threshold_mm: float = TOF_THRESHOLDS_MM[0]  # legacy fallback
         self.tof_thresholds_mm: list = list(TOF_THRESHOLDS_MM)
+        # Hold timer: once obstacle_response becomes non-CLEAR, the state
+        # persists for at least OBSTACLE_HOLD_S seconds even if the sensors
+        # briefly read clear. Prevents the sweeper from oscillating between
+        # clear and blocked every tick.
+        self._obs_hold_until: float = 0.0
 
         # Mode
         self.mode: str = "MUX"
@@ -147,9 +163,11 @@ class ToFState:
                 "frame_cnt": list(self.frame_cnt),
                 "hz": list(self.hz),
                 "ir_bits": self.ir_bits,
+                "ir_bits_raw": self.ir_bits_raw,
                 "ir_label": self.ir_label,
                 "ir_action": self.ir_action,
                 "ir_last_rx": self.ir_last_rx,
+                "ir_enabled": self.ir_enabled,
                 "obstacle_response": self.obstacle_response,
                 "obstacle_source": self.obstacle_source,
                 "obstacle_dist_mm": self.obstacle_dist_mm,
@@ -165,76 +183,143 @@ class ToFState:
                 "diag_zone_count": list(self.diag_zone_count),
             }
 
-    def update_obstacle_status(self):
+    def ingest_ir_raw(self, raw_bits: int) -> None:
         """
-        Recompute combined obstacle response from ToF + IR.
-
-        Channel authority (defined in constants.py):
-          SENSOR_REPLAN_CHANNELS   (CH0, CH1 — sides): trigger REPLAN
-          SENSOR_ADVISORY_CHANNELS (CH2 — top):         advisory only, no REPLAN
-          SENSOR_IGNORE_CHANNELS   (CH3 — bottom):      completely skipped
-
-        Priority: IR DANGER > IR CLOSE > primary ToF REPLAN > IR FAR > CLEAR.
+        Accept a raw IR sample and promote it into `ir_bits` only after
+        enough consecutive confirmations. Classifies each sample into one
+        of two categories — CLEAR (0) vs. OBSTACLE (any of 1/2/3) — so a
+        single flicker does not flip decisions. Separate ON / OFF
+        thresholds give a Schmitt-trigger feel: OFF is stricter so once
+        the arm commits to "obstacle" it does not un-commit on a single
+        quiet frame.
         """
         with self._lock:
-            # --- IR check (second line of defense — if it fires, ToF missed) ---
-            if self.ir_bits == 3:
-                self.obstacle_response = ObstacleResponse.BACK_AWAY
-                self.obstacle_source = "ir"
-                self.obstacle_dist_mm = 0.0
-                return
-            if self.ir_bits == 2:
-                self.obstacle_response = ObstacleResponse.BACK_AWAY
-                self.obstacle_source = "ir"
-                self.obstacle_dist_mm = 0.0
-                return
+            self.ir_bits_raw = int(raw_bits) & 0x03
+            self.ir_last_rx = time.time()
 
-            # --- Primary ToF check (SENSOR_REPLAN_CHANNELS only) ---
-            closest = float("inf")
-            closest_ch = -1
-            closest_thr = -1.0
-            for ch in range(self.num_channels):
-                if ch in SENSOR_IGNORE_CHANNELS:   # CH3 (bottom): skip
-                    continue
-                if self.active[ch] == 0:
-                    continue
-                g = self.grids[ch]
-                if np.isnan(g).all():
-                    continue
-                ch_min = float(np.nanmin(g))
-                thr = (
-                    self.tof_thresholds_mm[ch]
-                    if ch < len(self.tof_thresholds_mm)
-                    else self.tof_threshold_mm
-                )
-                if ch in SENSOR_ADVISORY_CHANNELS:
-                    # Advisory channels never trigger replans
-                    continue
-                if ch not in SENSOR_REPLAN_CHANNELS:
-                    continue
-                if ch_min < thr and ch_min < closest:
-                    closest = ch_min
-                    closest_ch = ch
-                    closest_thr = thr
-
-            if closest_ch >= 0:
-                self.obstacle_response = ObstacleResponse.REPLAN
-                self.obstacle_source = f"tof_ch{closest_ch}"
-                self.obstacle_dist_mm = closest
-                self.tof_threshold_mm = closest_thr
+            if not self.ir_enabled:
+                # Hard-off: force debounced state to CLEAR and skip voting
+                self.ir_bits = 0
+                self.ir_label = "DISABLED"
+                self.ir_action = ""
+                self._ir_pending_bits = 0
+                self._ir_pending_count = 0
                 return
 
-            # --- IR advisory (far detection, not critical) ---
-            if self.ir_bits == 1:
+            raw = self.ir_bits_raw
+            # Confirmation counter: track consecutive samples of this level.
+            if raw == self._ir_pending_bits:
+                self._ir_pending_count += 1
+            else:
+                self._ir_pending_bits = raw
+                self._ir_pending_count = 1
+
+            # Decide which threshold applies: tightening (ON) vs loosening (OFF).
+            # Going from CLEAR (0) → any hit needs ON_SAMPLES to confirm.
+            # Going from a hit back down to CLEAR needs OFF_SAMPLES to confirm.
+            # Transitions between hit levels (e.g. 1→2) use ON_SAMPLES.
+            committed = self.ir_bits
+            if self._ir_pending_bits == committed:
+                return  # no change — nothing to promote
+            if self._ir_pending_bits == 0:
+                threshold = IR_DEBOUNCE_OFF_SAMPLES
+            else:
+                threshold = IR_DEBOUNCE_ON_SAMPLES
+            if self._ir_pending_count < threshold:
+                return  # not confirmed yet
+
+            # Promote the pending level.
+            self.ir_bits = self._ir_pending_bits
+            self.ir_label = IR_LABELS.get(self.ir_bits, f"?{self.ir_bits}")
+            self.ir_action = IR_ACTIONS.get(self.ir_bits, "")
+
+    def update_obstacle_status(self):
+        """
+        Recompute combined obstacle response from ToF + (debounced) IR.
+
+        Channel authority (defined in constants.py):
+          SENSOR_REPLAN_CHANNELS   (CH0, CH1, CH2): trigger REPLAN
+          SENSOR_ADVISORY_CHANNELS (currently empty): reserved for future use
+          SENSOR_IGNORE_CHANNELS   (CH3 — bottom):    completely skipped
+
+        Priority: IR DANGER > IR CLOSE > primary ToF REPLAN > IR FAR > CLEAR.
+
+        A hold timer prevents the obstacle_response from relaxing back to
+        CLEAR faster than OBSTACLE_HOLD_S. This is what stops the arm from
+        jerking in place when a ToF reading oscillates across the threshold.
+        """
+        with self._lock:
+            now = time.time()
+            prev_response = self.obstacle_response
+            decision = ObstacleResponse.CLEAR
+            source = ""
+            dist = -1.0
+            threshold = self.tof_threshold_mm
+
+            # --- IR check (only if enabled and debounced bits are set) ---
+            ir_bits = self.ir_bits if self.ir_enabled else 0
+            if ir_bits == 3 or ir_bits == 2:
+                decision = ObstacleResponse.BACK_AWAY
+                source = "ir"
+                dist = 0.0
+            else:
+                # --- Primary ToF check (SENSOR_REPLAN_CHANNELS only) ---
+                closest = float("inf")
+                closest_ch = -1
+                closest_thr = -1.0
+                for ch in range(self.num_channels):
+                    if ch in SENSOR_IGNORE_CHANNELS:   # CH3 (bottom): skip
+                        continue
+                    if self.active[ch] == 0:
+                        continue
+                    g = self.grids[ch]
+                    if np.isnan(g).all():
+                        continue
+                    ch_min = float(np.nanmin(g))
+                    thr = (
+                        self.tof_thresholds_mm[ch]
+                        if ch < len(self.tof_thresholds_mm)
+                        else self.tof_threshold_mm
+                    )
+                    if ch in SENSOR_ADVISORY_CHANNELS:
+                        continue
+                    if ch not in SENSOR_REPLAN_CHANNELS:
+                        continue
+                    if ch_min < thr and ch_min < closest:
+                        closest = ch_min
+                        closest_ch = ch
+                        closest_thr = thr
+
+                if closest_ch >= 0:
+                    decision = ObstacleResponse.REPLAN
+                    source = f"tof_ch{closest_ch}"
+                    dist = closest
+                    threshold = closest_thr
+                elif ir_bits == 1:
+                    # IR advisory: logged but does not count as blocked.
+                    source = "ir_advisory"
+
+            # --- Apply hold timer -----------------------------------------
+            # When entering a blocked state, arm the hold timer so brief
+            # clear readings cannot cancel it. When the sensors say CLEAR
+            # but the hold is still active, preserve the previous response.
+            if decision != ObstacleResponse.CLEAR:
+                self._obs_hold_until = now + OBSTACLE_HOLD_S
+                self.obstacle_response = decision
+                self.obstacle_source = source
+                self.obstacle_dist_mm = dist
+                if decision == ObstacleResponse.REPLAN:
+                    self.tof_threshold_mm = threshold
+            else:
+                if (
+                    prev_response != ObstacleResponse.CLEAR
+                    and now < self._obs_hold_until
+                ):
+                    # Hold the previous blocked state — ignore this clear blip.
+                    return
                 self.obstacle_response = ObstacleResponse.CLEAR
-                self.obstacle_source = "ir_advisory"
+                self.obstacle_source = source  # may be "ir_advisory" or ""
                 self.obstacle_dist_mm = -1.0
-                return
-
-            # --- All clear ---
-            self.obstacle_response = ObstacleResponse.CLEAR
-            self.obstacle_source = ""
-            self.obstacle_dist_mm = -1.0
 
     @property
     def primary_threshold_mm(self) -> float:
@@ -264,7 +349,13 @@ class ToFBridge:
     def connect(self, port: str, baud: int = 115200) -> bool:
         """Open serial port and start reader thread."""
         self._last_open_error = ""
+        # Record the attempted port immediately so the display can show it
+        # even if the open fails.
+        self._state.port = port
         if not _SERIAL_OK:
+            self._last_open_error = (
+                "pyserial not installed (pip install pyserial)"
+            )
             return False
         try:
             ensure_serial_device_path(port, "Teensy serial port (--teensy-port)")
@@ -277,7 +368,6 @@ class ToFBridge:
             time.sleep(0.3)
             self._ser.reset_input_buffer()
 
-            self._state.port = port
             self._state.connected = True
 
             self._stop.clear()
@@ -294,7 +384,12 @@ class ToFBridge:
             return True
         except Exception as e:
             self._state.connected = False
-            self._last_open_error = str(e)
+            # str(e) is often empty for pyserial permission errors — fall back
+            # to repr() so the reviewer sees SOMETHING diagnostic.
+            msg = str(e).strip()
+            if not msg:
+                msg = repr(e)
+            self._last_open_error = msg
             return False
 
     def close(self) -> None:
@@ -528,12 +623,9 @@ class ToFBridge:
             return
         try:
             bits = int(parts[1]) & 0x03  # mask to 2 bits
-            with s._lock:
-                s.ir_bits = bits
-                s.ir_label = IR_LABELS.get(bits, f"?{bits}")
-                s.ir_action = IR_ACTIONS.get(bits, "")
-                s.ir_last_rx = time.time()
-
+            # Go through the debounce path so a single flapping sample
+            # can't trigger BACK_AWAY.
+            s.ingest_ir_raw(bits)
             s.update_obstacle_status()
         except Exception:
             pass

@@ -25,7 +25,7 @@ import curses
 import queue
 
 from .arm_state import ArmState
-from .serial_bridge import SerialBridge
+from .backends import BraccioBackend, HardwareBackend
 from .ik_solver import solve_ik, polar_to_cartesian, fk_polar
 from .keyboard_handler import KeyboardHandler
 from .display import CursesDisplay
@@ -33,8 +33,10 @@ from .state_library import StateLibrary
 from .tof_sensor import ToFState, ToFBridge, ObstacleResponse
 from .imu_state import IMUState
 from .obstacle_map import ObstacleMap
+from .motion_guard import MotionGuard
 from .auto_sweep import AutoSweeper
 from .data_publisher import DataPublisher
+from .session_logger import SessionLogger
 from .protocol import (
     cmd_set_all,
     cmd_set_joint,
@@ -74,10 +76,20 @@ class BraccioController:
 
     Parameters
     ----------
-    port       : serial port device path for Braccio arm, e.g. '/dev/ttyACM0'
-    baud       : baud rate (default 115200, must match Arduino sketch)
-    teensy_port: serial port for ToF/IR Teensy (None = no ToF)
-    teensy_baud: baud rate for Teensy (default 115200)
+    port         : serial port device path for Braccio arm, e.g. '/dev/ttyACM0'
+                   (ignored if `arm_backend` is provided)
+    baud         : baud rate (default 115200, must match Arduino sketch)
+    teensy_port  : serial port for ToF/IR Teensy (None = no ToF)
+    teensy_baud  : baud rate for Teensy (default 115200)
+    arm_backend  : pre-built BraccioBackend. When None, a HardwareBackend
+                   (pyserial) is built from `port`/`baud`. The digital twin
+                   passes a SimBackend here so the same control loop drives
+                   PyBullet instead of a physical Arduino.
+    sensor_backend: pre-built ToF/IR/IMU reader. When None, a hardware
+                   ToFBridge is built. The sim passes a reader that pushes
+                   ray-cast results into ToFState/IMUState directly.
+    tof_state    : optional pre-built ToFState. Defaults to a fresh one.
+    imu_state    : optional pre-built IMUState. Defaults to a fresh one.
     """
 
     def __init__(
@@ -86,30 +98,58 @@ class BraccioController:
         baud: int = BAUD_RATE,
         teensy_port: str = TOF_DEFAULT_PORT,
         teensy_baud: int = TOF_BAUD_RATE,
+        enable_ir: bool = True,
+        arm_backend: BraccioBackend | None = None,
+        sensor_backend=None,
+        tof_state: "ToFState | None" = None,
+        imu_state: "IMUState | None" = None,
     ):
-        self._bridge = SerialBridge(port, baud)
+        # Arm backend — either injected (sim) or built from port (hardware).
+        self._bridge: BraccioBackend = arm_backend or HardwareBackend(port, baud)
         self._state = ArmState()
         self._state_lib = StateLibrary()
         self._publisher = DataPublisher()
         self._stdscr = None  # set inside _curses_main
 
         # ── ToF / IR subsystem ────────────────────────────────────────────
-        self._tof_state = ToFState(num_channels=TOF_NUM_CHANNELS)
+        self._tof_state = tof_state or ToFState(num_channels=TOF_NUM_CHANNELS)
         self._tof_state.tof_threshold_mm = TOF_THRESHOLDS_MM[0]
         self._tof_state.tof_thresholds_mm = list(TOF_THRESHOLDS_MM)
-        self._imu_state = IMUState()
-        self._tof_bridge = ToFBridge(self._tof_state, self._imu_state)
+        # IR integration can be disabled at launch with --no-ir. The ToF
+        # reader still receives IR lines but forces the debounced bits to 0,
+        # so neither obstacle_response nor the display path ever reacts.
+        self._tof_state.ir_enabled = bool(enable_ir)
+        self._imu_state = imu_state or IMUState()
+        self._tof_bridge = sensor_backend or ToFBridge(self._tof_state, self._imu_state)
         self._teensy_port = teensy_port
         self._teensy_baud = teensy_baud
 
-        # ── Obstacle map + autonomous sweep ──────────────────────────────
+        # ── Obstacle map + motion guard + autonomous sweep ───────────────
         self._obstacle_map = ObstacleMap(thresholds_mm=TOF_THRESHOLDS_MM)
+        # Wire tof_state into the guard so manual commands are gated on the
+        # live ToF snapshot, not just the voxel memory. The voxel memory
+        # lags the sensor FOV by exactly the commands that would push the
+        # arm into an obstacle — see the "Live-sensor gate" section of
+        # motion_guard.py for the full reasoning.
+        self._guard = MotionGuard(self._obstacle_map, tof_state=self._tof_state)
         self._sweeper = AutoSweeper(
             arm_state=self._state,
             bridge=self._bridge,
             tof_state=self._tof_state,
             obstacle_map=self._obstacle_map,
+            guard=self._guard,
         )
+
+        # ── Session telemetry logger (JSONL for offline review) ─────────
+        self._logger = SessionLogger()
+        self._logger.set_sources(
+            arm_state=self._state,
+            tof_state=self._tof_state,
+            sweeper=self._sweeper,
+        )
+        # Track sweep state for edge-triggered events
+        self._prev_sweep_running = False
+        self._prev_obs_response = "clear"
 
     # ── Entry point ───────────────────────────────────────────────────────
 
@@ -138,11 +178,21 @@ class BraccioController:
                 with self._state._lock:
                     self._state.last_error = f"ToF Teensy: {detail}"
 
+        # Start session telemetry logger (writes session_logs/session_*.jsonl)
+        try:
+            log_path = self._logger.start()
+            with self._state._lock:
+                self._state.last_resp = f"log: {log_path}"
+        except Exception as exc:
+            with self._state._lock:
+                self._state.last_error = f"logger: {exc}"
+
         # Main loop (~5 Hz, paced by keyboard halfdelay)
         while True:
             self._drain_responses()
             self._check_obstacle()
             self._update_obstacle_map()
+            self._log_edge_events()
 
             action = kb.get_action()
 
@@ -150,6 +200,8 @@ class BraccioController:
                 break
 
             if action is not None:
+                # Tag every user action in the telemetry stream
+                self._logger.log_event("action", {"action": action})
                 self._handle_action(action)
 
             # Merge ToF + IMU + sweep snapshots into arm state for display
@@ -171,6 +223,10 @@ class BraccioController:
 
         if self._sweeper.is_running():
             self._sweeper.stop()
+        try:
+            self._logger.stop()
+        except Exception:
+            pass
         self._bridge.close()
         self._tof_bridge.close()
         self._publisher.close()
@@ -222,6 +278,43 @@ class BraccioController:
                 self._state.connected = False
                 self._state.last_error = f"Cannot open {self._bridge._port} — {hint}"
 
+    # ── Telemetry edge events ─────────────────────────────────────────────
+
+    def _log_edge_events(self) -> None:
+        """
+        Emit one-off telemetry events when observable state transitions.
+        Called once per main-loop tick, BEFORE handling new keyboard input,
+        so the stream reads as a causal history.
+        """
+        if not self._logger.is_running:
+            return
+
+        # Sweep start/stop edges
+        sweep_running = self._sweeper.is_running()
+        if sweep_running != self._prev_sweep_running:
+            self._logger.log_event(
+                "sweep_running",
+                {"running": sweep_running},
+            )
+            self._prev_sweep_running = sweep_running
+
+        # Obstacle response edges (clear → replan → back_away)
+        with self._state._lock:
+            response = self._state.obstacle_response
+            source = self._state.obstacle_source
+            dist = self._state.obstacle_dist_mm
+        if response != self._prev_obs_response:
+            self._logger.log_event(
+                "obstacle_response",
+                {
+                    "from": self._prev_obs_response,
+                    "to": response,
+                    "source": source,
+                    "dist_mm": dist,
+                },
+            )
+            self._prev_obs_response = response
+
     # ── Obstacle detection ────────────────────────────────────────────────
 
     def _check_obstacle(self) -> None:
@@ -235,6 +328,13 @@ class BraccioController:
         The actual trajectory replanning / retreat is signaled through
         ArmState fields so the display shows the alert and higher-level
         autonomy code can act on it.
+
+        The ToF warning is routed through `last_error` for display. This
+        function must never overwrite an error set by MotionGuard (e.g.
+        "Obstacle blocks θ=…") — guard errors always take precedence so
+        the user sees why a specific command was refused. Only previously
+        self-authored ToF/IR warnings (or empty errors) are replaced on
+        a new tick.
         """
         snap = self._tof_state.snapshot()
         response = snap["obstacle_response"]
@@ -246,33 +346,48 @@ class BraccioController:
             self._state.obstacle_source = source
             self._state.obstacle_dist_mm = dist
 
+            current_err = self._state.last_error or ""
+            # Only error strings we previously wrote ourselves (or blanks)
+            # are safe to replace. Guard rejection errors ("Obstacle
+            # blocks", "Replanned around obstacle", "HOME blocked",
+            # "Saved state blocked", …) must survive so the user sees why
+            # their command was refused.
+            overwritable = (
+                not current_err
+                or current_err.startswith("ToF:")
+                or current_err.startswith("IR DANGER")
+            )
+
             if response == ObstacleResponse.BACK_AWAY:
-                self._state.last_error = (
-                    f"IR DANGER — BACK AWAY! (src={source}) "
-                    f"ToF failed to detect, IR is second line of defense"
-                )
+                if overwritable:
+                    self._state.last_error = (
+                        f"IR DANGER — BACK AWAY! (src={source}) "
+                        f"ToF failed to detect, IR is second line of defense"
+                    )
             elif response == ObstacleResponse.REPLAN:
-                ch_idx = -1
-                try:
-                    ch_idx = int(source.replace("tof_ch", ""))
-                except (ValueError, AttributeError):
-                    pass
-                thresholds = snap.get("tof_thresholds_mm", TOF_THRESHOLDS_MM)
-                ch_thresh = (
-                    thresholds[ch_idx]
-                    if 0 <= ch_idx < len(thresholds)
-                    else "?"
-                )
-                self._state.last_error = (
-                    f"ToF: obstacle at {dist:.0f} mm "
-                    f"(ch{ch_idx} threshold={ch_thresh:.0f} mm, "
-                    f"src={source}) — REPLAN TRAJECTORY"
-                )
+                if overwritable:
+                    ch_idx = -1
+                    try:
+                        ch_idx = int(source.replace("tof_ch", ""))
+                    except (ValueError, AttributeError):
+                        pass
+                    thresholds = snap.get("tof_thresholds_mm", TOF_THRESHOLDS_MM)
+                    ch_thresh = (
+                        thresholds[ch_idx]
+                        if 0 <= ch_idx < len(thresholds)
+                        else "?"
+                    )
+                    self._state.last_error = (
+                        f"ToF: obstacle at {dist:.0f} mm "
+                        f"(ch{ch_idx} threshold={ch_thresh:.0f} mm, "
+                        f"src={source}) — REPLAN TRAJECTORY"
+                    )
             else:
-                # Clear obstacle-related errors (don't clear other errors)
+                # Obstacle cleared: drop only our own ToF/IR warnings so we
+                # don't clobber unrelated error strings from other handlers.
                 if (
-                    "BACK AWAY" in self._state.last_error
-                    or "REPLAN" in self._state.last_error
+                    current_err.startswith("ToF:")
+                    or current_err.startswith("IR DANGER")
                 ):
                     self._state.last_error = ""
 
@@ -507,7 +622,13 @@ class BraccioController:
     # ── Command senders ───────────────────────────────────────────────────
 
     def _send_ik_move(self) -> None:
-        """Recompute IK and send SET ALL for the current polar state."""
+        """Recompute IK and send SET ALL for the current polar state.
+
+        Runs the desired pose through MotionGuard first. If the target is
+        blocked the guard may return a replanned pose; if nothing clears,
+        the command is rejected and the IK shadow is rolled back so the
+        display matches what the arm actually does.
+        """
         state = self._state
         with state._lock:
             theta = state.theta
@@ -516,6 +637,36 @@ class BraccioController:
             wrist_offset = state.wrist_offset
             wrist_rot = state.wrist_rot
             gripper = state.gripper
+            # Where the arm currently is, for the swept-volume path check.
+            cur_theta_r_z = fk_polar(list(state.joints))
+
+        planned = self._guard.plan_clear_pose(
+            desired=(theta, r, z),
+            current=cur_theta_r_z,
+        )
+
+        if planned is None:
+            with state._lock:
+                # Roll back the IK shadow to current so the display doesn't
+                # show a pose the arm never entered.
+                state.theta, state.r, state.z = cur_theta_r_z
+                state.last_error = (
+                    f"Obstacle blocks θ={theta:.0f}° r={r:.0f} z={z:.0f} "
+                    f"— retract (s) or change z (q/e) to clear"
+                )
+            return
+
+        if planned != (theta, r, z):
+            with state._lock:
+                state.theta, state.r, state.z = planned
+                state.last_error = (
+                    f"Replanned around obstacle → "
+                    f"θ={planned[0]:.0f}° r={planned[1]:.0f} z={planned[2]:.0f}"
+                )
+            theta, r, z = planned
+        else:
+            with state._lock:
+                state.last_error = ""
 
         x, y = polar_to_cartesian(theta, r)
         result = solve_ik(x, y, z)
@@ -533,7 +684,6 @@ class BraccioController:
         cmd = cmd_set_all(positions)
         with state._lock:
             state.last_cmd = cmd.strip()
-            state.last_error = ""
         self._bridge.send_cmd(cmd)
 
     def _send_wrist_rot(self) -> None:
@@ -560,36 +710,161 @@ class BraccioController:
         self._bridge.send_cmd(cmd)
 
     def _send_home(self) -> None:
-        """Restore IK state to equilibrium and send HOME command."""
-        self._state.restore_equil()
-        cmd = cmd_home()
-        with self._state._lock:
-            self._state.last_cmd = cmd.strip()
-            self._state.last_error = ""
+        """Restore IK state to equilibrium and send HOME command.
+
+        The firmware HOME is a one-shot interpolation we can't abort
+        mid-move, so we gate it through MotionGuard first. If the
+        equilibrium pose is clear we send the native HOME; otherwise we
+        fall back to SET ALL at a replanned pose.
+        """
+        state = self._state
+        with state._lock:
+            cur_joints = list(state.joints)
+            eq_theta = state.equil_theta
+            eq_r = state.equil_r
+            eq_z = state.equil_z
+            eq_wrist_offset = state.equil_wrist_offset
+            eq_wrist_rot = state.equil_wrist_rot
+            eq_gripper = state.equil_gripper
+
+        cur_theta_r_z = fk_polar(cur_joints)
+        planned = self._guard.plan_clear_pose(
+            desired=(eq_theta, eq_r, eq_z),
+            current=cur_theta_r_z,
+        )
+
+        if planned is None:
+            with state._lock:
+                state.last_error = "HOME blocked by obstacle — no clear route"
+            return
+
+        if planned == (eq_theta, eq_r, eq_z):
+            # Clear path to the real equilibrium — fast path via firmware HOME.
+            state.restore_equil()
+            cmd = cmd_home()
+            with state._lock:
+                state.last_cmd = cmd.strip()
+                state.last_error = ""
+            self._bridge.send_cmd(cmd)
+            self._bridge.send_cmd(cmd_get_pos())
+            return
+
+        # Equilibrium blocked — build a SET ALL move to the replanned pose.
+        theta, r, z = planned
+        x, y = polar_to_cartesian(theta, r)
+        result = solve_ik(x, y, z)
+        if result is None:
+            with state._lock:
+                state.last_error = (
+                    f"HOME replan unreachable: θ={theta:.0f}° r={r:.0f} z={z:.0f}"
+                )
+            return
+
+        with state._lock:
+            state.theta = theta
+            state.r = r
+            state.z = z
+            state.wrist_offset = eq_wrist_offset
+            state.wrist_rot = eq_wrist_rot
+            state.gripper = eq_gripper
+        state.update_joints_from_ik(
+            result, eq_wrist_offset, eq_wrist_rot, eq_gripper
+        )
+        positions = state.snapshot()["joints"]
+        cmd = cmd_set_all(positions)
+        with state._lock:
+            state.last_cmd = cmd.strip()
+            state.last_error = (
+                f"HOME replanned around obstacle → "
+                f"θ={theta:.0f}° r={r:.0f} z={z:.0f}"
+            )
         self._bridge.send_cmd(cmd)
-        # Resync joint shadow after home completes
-        self._bridge.send_cmd(cmd_get_pos())
 
     # ── State library helpers ─────────────────────────────────────────────
 
     def _apply_state(self, state_dict: dict) -> None:
         """
         Apply a saved state dict to the arm.
-        Updates both the joint shadow and the IK display state, then sends
-        a SET ALL command.
+
+        Runs the saved pose through MotionGuard first. If the pose is
+        blocked, either replans to a nearby clear pose (preserving wrist
+        offset, wrist rotation, and gripper) or rejects the command and
+        leaves the arm where it is.
         """
-        with self._state._lock:
-            self._state.joints = list(state_dict["joints"])
-            self._state.theta = state_dict["theta"]
-            self._state.r = state_dict["r"]
-            self._state.z = state_dict["z"]
-            self._state.wrist_offset = state_dict["wrist_offset"]
-            self._state.wrist_rot = state_dict["wrist_rot"]
-            self._state.gripper = state_dict["gripper"]
-        cmd = cmd_set_all(state_dict["joints"])
-        with self._state._lock:
-            self._state.last_cmd = cmd.strip()
-            self._state.last_error = ""
+        state = self._state
+        with state._lock:
+            cur_joints = list(state.joints)
+        cur_theta_r_z = fk_polar(cur_joints)
+
+        desired_theta = float(state_dict["theta"])
+        desired_r     = float(state_dict["r"])
+        desired_z     = float(state_dict["z"])
+        wrist_offset  = state_dict["wrist_offset"]
+        wrist_rot     = state_dict["wrist_rot"]
+        gripper       = state_dict["gripper"]
+
+        planned = self._guard.plan_clear_pose(
+            desired=(desired_theta, desired_r, desired_z),
+            current=cur_theta_r_z,
+        )
+
+        if planned is None:
+            with state._lock:
+                state.last_error = (
+                    f"Saved state blocked by obstacle "
+                    f"(θ={desired_theta:.0f}° r={desired_r:.0f} z={desired_z:.0f})"
+                )
+            return
+
+        theta, r, z = planned
+        was_replanned = planned != (desired_theta, desired_r, desired_z)
+
+        # Happy path: the saved joint array is still valid because nothing
+        # was replanned. Reuse the raw joints verbatim so we preserve any
+        # off-level wrist pose the user captured.
+        if not was_replanned:
+            with state._lock:
+                state.joints = list(state_dict["joints"])
+                state.theta = theta
+                state.r = r
+                state.z = z
+                state.wrist_offset = wrist_offset
+                state.wrist_rot = wrist_rot
+                state.gripper = gripper
+            cmd = cmd_set_all(state_dict["joints"])
+            with state._lock:
+                state.last_cmd = cmd.strip()
+                state.last_error = ""
+            self._bridge.send_cmd(cmd)
+            return
+
+        # Replanned: recompute joints via IK at the new pose, preserving
+        # wrist_offset / wrist_rot / gripper from the saved state.
+        x, y = polar_to_cartesian(theta, r)
+        result = solve_ik(x, y, z)
+        if result is None:
+            with state._lock:
+                state.last_error = (
+                    f"Replan unreachable: θ={theta:.0f}° r={r:.0f} z={z:.0f}"
+                )
+            return
+
+        with state._lock:
+            state.theta = theta
+            state.r = r
+            state.z = z
+            state.wrist_offset = wrist_offset
+            state.wrist_rot = wrist_rot
+            state.gripper = gripper
+        state.update_joints_from_ik(result, wrist_offset, wrist_rot, gripper)
+        positions = state.snapshot()["joints"]
+        cmd = cmd_set_all(positions)
+        with state._lock:
+            state.last_cmd = cmd.strip()
+            state.last_error = (
+                f"Saved state replanned around obstacle → "
+                f"θ={theta:.0f}° r={r:.0f} z={z:.0f}"
+            )
         self._bridge.send_cmd(cmd)
 
     def _run_named_state(self, name: str) -> None:

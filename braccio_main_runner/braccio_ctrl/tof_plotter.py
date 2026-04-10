@@ -12,7 +12,7 @@ Keyboard shortcuts (focus any plot window):
   Y       — screenshot: save current figure as PNG
   T       — toggle CSV logging (all 4 channels, min/avg/max per frame)
   0       — toggle main 4-channel combined window
-  1–4     — toggle individual channel pop-out window
+  1-4     — toggle individual channel pop-out window
   +/-     — adjust ToF threshold distance ±50 mm
 
 Usage:
@@ -23,26 +23,54 @@ Usage:
   plotter.stop()
 """
 
+from __future__ import annotations
+
 import csv
 import importlib
 import os
 import queue
 import threading
 import time
+from collections.abc import Iterable
 from datetime import datetime
+from types import ModuleType
+from typing import TYPE_CHECKING, Any, Protocol, TextIO
 
 import numpy as np
 
+from .mpl_compat import figure_number
 from .tof_sensor import ToFState
 from .constants import (
-    LOG_DIR, SCREENSHOT_DIR,
-    TOF_UPSAMPLE_N, TOF_SURFACE_EVERY, TOF_PLOT_INTERVAL_MS,
+    LOG_DIR,
+    SCREENSHOT_DIR,
+    TOF_UPSAMPLE_N,
+    TOF_SURFACE_EVERY,
+    TOF_PLOT_INTERVAL_MS,
     TOF_MAX_RANGE_MM,
 )
 
+if TYPE_CHECKING:
+    from matplotlib.animation import FuncAnimation
+    from matplotlib.axes import Axes
+    from matplotlib.figure import Figure
+    from matplotlib.image import AxesImage
+    from matplotlib.text import Text
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+    from mpl_toolkits.mplot3d.axes3d import Axes3D
+
+
+class _CsvRowWriter(Protocol):
+    def writerow(self, row: Iterable[object]) -> object: ...
+
+
 # ── Visual constants ─────────────────────────────────────────────────────────
-_CH_COLORS  = ['#89B4FA', '#A6E3A1', '#F9E2AF', '#F38BA8']  # Catppuccin blue/green/yellow/red
-_CH_CMAPS   = ['viridis', 'plasma', 'inferno', 'cividis']
+_CH_COLORS = [
+    "#89B4FA",
+    "#A6E3A1",
+    "#F9E2AF",
+    "#F38BA8",
+]  # Catppuccin blue/green/yellow/red
+_CH_CMAPS = ["viridis", "plasma", "inferno", "cividis"]
 
 
 def _upsample_bilinear(z8: np.ndarray, N: int) -> np.ndarray:
@@ -72,50 +100,48 @@ class ToFPlotter:
     def __init__(
         self,
         state: ToFState,
-        upsample_n: int   = TOF_UPSAMPLE_N,
+        upsample_n: int = TOF_UPSAMPLE_N,
         surface_every: int = TOF_SURFACE_EVERY,
-        interval_ms: int   = TOF_PLOT_INTERVAL_MS,
+        interval_ms: int = TOF_PLOT_INTERVAL_MS,
     ):
-        self._state       = state
-        self._upsample_n  = upsample_n
+        self._state = state
+        self._upsample_n = upsample_n
         self._surface_every = surface_every
         self._interval_ms = interval_ms
-        self._num_ch      = state.num_channels
+        self._num_ch = state.num_channels
 
         # Meshgrid for 3D surfaces
-        self._XN, self._YN = np.meshgrid(
-            np.arange(upsample_n), np.arange(upsample_n)
-        )
+        self._XN, self._YN = np.meshgrid(np.arange(upsample_n), np.arange(upsample_n))
 
         # ── Lifecycle ─────────────────────────────────────────────────────
-        self._stop_event   = threading.Event()
-        self._plt          = None
-        self._ui_ready     = False
-        self._ui_thread    = None
-        self._ui_thread_id = None
-        self._ui_cmd_q     = queue.SimpleQueue()
+        self._stop_event = threading.Event()
+        self._plt: ModuleType | None = None
+        self._ui_ready: bool = False
+        self._ui_thread: threading.Thread | None = None
+        self._ui_thread_id: int | None = None
+        self._ui_cmd_q: queue.SimpleQueue[tuple[str, Any]] = queue.SimpleQueue()
 
         # ── Main combined figure (2×4: heatmaps + surfaces) ──────────────
-        self._fig       = None
-        self._ax_heat   = []    # list[Axes], length num_ch
-        self._ax_surf   = []    # list[Axes], length num_ch
-        self._imshows   = []    # list[AxesImage]
-        self._surfaces  = []    # list[Poly3DCollection]
-        self._anim      = None
-        self._status_txt = None  # IR + obstacle status text
+        self._fig: Figure | None = None
+        self._ax_heat: list[Axes] = []
+        self._ax_surf: list[Axes3D] = []
+        self._imshows: list[AxesImage] = []
+        self._surfaces: list[Poly3DCollection] = []
+        self._anim: FuncAnimation | None = None
+        self._status_txt: Text | None = None  # IR + obstacle status text
 
         # ── Per-channel pop-out figures ───────────────────────────────────
-        self._ind_figs  = [None] * self._num_ch
-        self._ind_ax_h  = [None] * self._num_ch
-        self._ind_ax_s  = [None] * self._num_ch
-        self._ind_ims   = [None] * self._num_ch
-        self._ind_surfs = [None] * self._num_ch
+        self._ind_figs: list[Figure | None] = [None] * self._num_ch
+        self._ind_ax_h: list[Axes | None] = [None] * self._num_ch
+        self._ind_ax_s: list[Axes3D | None] = [None] * self._num_ch
+        self._ind_ims: list[AxesImage | None] = [None] * self._num_ch
+        self._ind_surfs: list[Poly3DCollection | None] = [None] * self._num_ch
 
         # ── CSV logging ──────────────────────────────────────────────────
-        self._logging     = False
-        self._log_file    = None
-        self._log_writer  = None
-        self._log_lock    = threading.Lock()
+        self._logging: bool = False
+        self._log_file: TextIO | None = None
+        self._log_writer: _CsvRowWriter | None = None
+        self._log_lock = threading.Lock()
 
         # ── Frame counter for surface throttling ─────────────────────────
         self._draw_count = [0] * self._num_ch
@@ -128,7 +154,7 @@ class ToFPlotter:
         self._ui_thread = threading.Thread(
             target=self._ui_loop,
             daemon=True,
-            name='tof-plotter-ui',
+            name="tof-plotter-ui",
         )
         self._ui_thread.start()
 
@@ -140,7 +166,7 @@ class ToFPlotter:
         """Signal stop, close logs, close figures."""
         self._stop_event.set()
         self._close_log()
-        self._ui_cmd_q.put(('shutdown', None))
+        self._ui_cmd_q.put(("shutdown", None))
         if self._plt is not None:
             try:
                 if self._fig is not None:
@@ -162,7 +188,7 @@ class ToFPlotter:
         if threading.get_ident() == self._ui_thread_id:
             self._toggle_main_window()
         else:
-            self._ui_cmd_q.put(('toggle_main', None))
+            self._ui_cmd_q.put(("toggle_main", None))
 
     def toggle_channel(self, ch: int) -> None:
         """Toggle a single-channel pop-out window."""
@@ -171,19 +197,19 @@ class ToFPlotter:
         if threading.get_ident() == self._ui_thread_id:
             self._toggle_ind_window(ch)
         else:
-            self._ui_cmd_q.put(('toggle_ch', ch))
+            self._ui_cmd_q.put(("toggle_ch", ch))
 
     def save_screenshot(self) -> str:
         """Save the main figure as PNG."""
         if threading.get_ident() != self._ui_thread_id:
-            self._ui_cmd_q.put(('screenshot', None))
-            return ''
+            self._ui_cmd_q.put(("screenshot", None))
+            return ""
         if self._fig is None:
-            return ''
+            return ""
         os.makedirs(SCREENSHOT_DIR, exist_ok=True)
-        ts   = datetime.now().strftime('%Y%m%d_%H%M%S')
-        path = os.path.join(SCREENSHOT_DIR, f'tof_screenshot_{ts}.png')
-        self._fig.savefig(path, dpi=150, bbox_inches='tight')
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(SCREENSHOT_DIR, f"tof_screenshot_{ts}.png")
+        self._fig.savefig(path, dpi=150, bbox_inches="tight")
         return path
 
     def toggle_logging(self) -> bool:
@@ -194,12 +220,21 @@ class ToFPlotter:
                 self._logging = False
             else:
                 os.makedirs(LOG_DIR, exist_ok=True)
-                ts   = datetime.now().strftime('%Y%m%d_%H%M%S')
-                path = os.path.join(LOG_DIR, f'tof_{ts}.csv')
-                self._log_file   = open(path, 'w', newline='', buffering=1)
-                self._log_writer = csv.writer(self._log_file)
-                header = ['timestamp', 'channel', 'min_mm', 'avg_mm', 'max_mm',
-                           'ir_bits', 'ir_label', 'obstacle_response']
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                path = os.path.join(LOG_DIR, f"tof_{ts}.csv")
+                log_f = open(path, "w", newline="", buffering=1)
+                self._log_file = log_f
+                self._log_writer = csv.writer(log_f)
+                header = [
+                    "timestamp",
+                    "channel",
+                    "min_mm",
+                    "avg_mm",
+                    "max_mm",
+                    "ir_bits",
+                    "ir_label",
+                    "obstacle_response",
+                ]
                 self._log_writer.writerow(header)
                 self._logging = True
             return self._logging
@@ -207,19 +242,19 @@ class ToFPlotter:
     def export_csv_snapshot(self) -> str:
         """Export current grids of all channels to a single CSV file."""
         os.makedirs(LOG_DIR, exist_ok=True)
-        ts   = datetime.now().strftime('%Y%m%d_%H%M%S')
-        path = os.path.join(LOG_DIR, f'tof_grids_{ts}.csv')
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(LOG_DIR, f"tof_grids_{ts}.csv")
 
         snap = self._state.snapshot()
-        with open(path, 'w', newline='') as f:
+        with open(path, "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow(['channel', 'row', 'col', 'distance_mm'])
-            for ch in range(snap['num_channels']):
-                grid = snap['grids'][ch]
+            w.writerow(["channel", "row", "col", "distance_mm"])
+            for ch in range(snap["num_channels"]):
+                grid = snap["grids"][ch]
                 rows, cols = grid.shape
                 for r in range(rows):
                     for c in range(cols):
-                        w.writerow([ch, r, c, f'{grid[r, c]:.1f}'])
+                        w.writerow([ch, r, c, f"{grid[r, c]:.1f}"])
         return path
 
     # ── Internal helpers ──────────────────────────────────────────────────
@@ -231,22 +266,24 @@ class ToFPlotter:
                 self._log_file.close()
             except Exception:
                 pass
-            self._log_file   = None
+            self._log_file = None
             self._log_writer = None
 
     def _select_backend(self):
-        matplotlib = importlib.import_module('matplotlib')
+        matplotlib = importlib.import_module("matplotlib")
         # Qt backends are safe to create from a non-main thread (unlike TkAgg,
         # whose C layer enforces Tcl thread affinity and crashes on Python 3.14).
-        for name, mod in [('qtagg', 'matplotlib.backends.backend_qtagg'),
-                          ('tkagg', 'matplotlib.backends.backend_tkagg')]:
+        for name, mod in [
+            ("qtagg", "matplotlib.backends.backend_qtagg"),
+            ("tkagg", "matplotlib.backends.backend_tkagg"),
+        ]:
             try:
                 importlib.import_module(mod)
                 matplotlib.use(name, force=True)
                 return name
             except Exception:
                 pass
-        raise RuntimeError('No usable matplotlib GUI backend')
+        raise RuntimeError("No usable matplotlib GUI backend")
 
     # ── UI thread ─────────────────────────────────────────────────────────
 
@@ -263,10 +300,12 @@ class ToFPlotter:
                 time.sleep(0.02)
                 continue
             try:
-                if self._fig is not None and self._plt.fignum_exists(self._fig.number):
+                if self._fig is not None and self._plt.fignum_exists(
+                    figure_number(self._fig)
+                ):
                     self._fig.canvas.flush_events()
                 for fig in self._ind_figs:
-                    if fig is not None and self._plt.fignum_exists(fig.number):
+                    if fig is not None and self._plt.fignum_exists(figure_number(fig)):
                         fig.canvas.flush_events()
             except Exception:
                 pass
@@ -278,143 +317,187 @@ class ToFPlotter:
                 cmd, payload = self._ui_cmd_q.get_nowait()
             except Exception:
                 return
-            if cmd == 'toggle_main':
+            if cmd == "toggle_main":
                 self._toggle_main_window()
-            elif cmd == 'toggle_ch':
+            elif cmd == "toggle_ch":
                 self._toggle_ind_window(int(payload))
-            elif cmd == 'screenshot':
+            elif cmd == "screenshot":
                 self.save_screenshot()
-            elif cmd == 'export_csv':
+            elif cmd == "export_csv":
                 self.export_csv_snapshot()
-            elif cmd == 'shutdown':
+            elif cmd == "shutdown":
                 return
 
     def _init_ui(self):
         try:
             self._select_backend()
-            plt = importlib.import_module('matplotlib.pyplot')
-            FuncAnimation = importlib.import_module('matplotlib.animation').FuncAnimation
+            plt = importlib.import_module("matplotlib.pyplot")
+            FuncAnimation = importlib.import_module(
+                "matplotlib.animation"
+            ).FuncAnimation
         except Exception:
             return
 
         self._plt = plt
         self._build_main_figure()
 
+        fig = self._fig
+        assert fig is not None
         self._anim = FuncAnimation(
-            self._fig,
+            fig,
             self._update,
             interval=self._interval_ms,
             blit=False,
             cache_frame_data=False,
         )
         plt.show(block=False)
-        self._fig.canvas.draw_idle()
-        self._fig.canvas.flush_events()
+        fig.canvas.draw_idle()
+        fig.canvas.flush_events()
         # Start hidden — user toggles with the key binding
         self._set_main_visible(False)
         self._ui_ready = True
 
     # ── Figure construction ───────────────────────────────────────────────
 
-    def _build_main_figure(self):
+    def _build_main_figure(self) -> None:
         plt = self._plt
-        N   = self._upsample_n
+        if plt is None:
+            return
+        N = self._upsample_n
 
         fig = plt.figure(figsize=(16, 8))
-        fig.suptitle('ToF Sensors — Live View (4 Channels)', fontsize=11)
+        fig.suptitle("ToF Sensors — Live View (4 Channels)", fontsize=11)
 
-        self._ax_heat   = []
-        self._ax_surf   = []
-        self._imshows   = []
-        self._surfaces  = []
+        self._ax_heat = []
+        self._ax_surf = []
+        self._imshows = []
+        self._surfaces = []
 
         init_z = np.zeros((N, N), dtype=np.float32)
 
         for ch in range(self._num_ch):
             # Top row: heatmaps
             ax_h = fig.add_subplot(2, self._num_ch, ch + 1)
-            ax_h.set_title(f'CH{ch} Heatmap', fontsize=9)
-            im = ax_h.imshow(init_z, origin='lower', aspect='equal',
-                             vmin=0, vmax=TOF_MAX_RANGE_MM,
-                             cmap=_CH_CMAPS[ch % len(_CH_CMAPS)])
+            ax_h.set_title(f"CH{ch} Heatmap", fontsize=9)
+            im = ax_h.imshow(
+                init_z,
+                origin="lower",
+                aspect="equal",
+                vmin=0,
+                vmax=TOF_MAX_RANGE_MM,
+                cmap=_CH_CMAPS[ch % len(_CH_CMAPS)],
+            )
             plt.colorbar(im, ax=ax_h, fraction=0.046, pad=0.04)
             self._ax_heat.append(ax_h)
             self._imshows.append(im)
 
             # Bottom row: 3D surfaces
-            ax_s = fig.add_subplot(2, self._num_ch, self._num_ch + ch + 1,
-                                   projection='3d')
-            ax_s.set_title(f'CH{ch} Surface', fontsize=9)
-            ax_s.set_xlabel('X', fontsize=7)
-            ax_s.set_ylabel('Y', fontsize=7)
-            ax_s.set_zlabel('mm', fontsize=7)
-            surf = ax_s.plot_surface(self._XN, self._YN, init_z,
-                                     rstride=2, cstride=2,
-                                     linewidth=0, antialiased=True)
+            ax_s = fig.add_subplot(
+                2, self._num_ch, self._num_ch + ch + 1, projection="3d"
+            )
+            ax_s.set_title(f"CH{ch} Surface", fontsize=9)
+            ax_s.set_xlabel("X", fontsize=7)
+            ax_s.set_ylabel("Y", fontsize=7)
+            ax_s.set_zlabel("mm", fontsize=7)
+            surf = ax_s.plot_surface(
+                self._XN,
+                self._YN,
+                init_z,
+                rstride=2,
+                cstride=2,
+                linewidth=0,
+                antialiased=True,
+            )
             self._ax_surf.append(ax_s)
             self._surfaces.append(surf)
 
         # Status text at bottom
         self._status_txt = fig.text(
-            0.5, 0.01, '', ha='center', fontsize=8, color='red',
-            fontweight='bold',
+            0.5,
+            0.01,
+            "",
+            ha="center",
+            fontsize=8,
+            color="red",
+            fontweight="bold",
         )
 
         # Key hint
-        hint = ('[U] reset  [Y] screenshot  [T] log  [C] export CSV  '
-                '[0] toggle main  [1-4] pop-out  [+/-] threshold')
-        fig.text(0.5, 0.005, hint, ha='center', fontsize=6, color='#888888')
+        hint = (
+            "[U] reset  [Y] screenshot  [T] log  [C] export CSV  "
+            "[0] toggle main  [1-4] pop-out  [+/-] threshold"
+        )
+        fig.text(0.5, 0.005, hint, ha="center", fontsize=6, color="#888888")
 
-        fig.canvas.mpl_connect('key_press_event', self._on_key)
+        fig.canvas.mpl_connect("key_press_event", self._on_key)
         fig.tight_layout(rect=[0, 0.03, 1, 0.95])
         self._fig = fig
 
     def _build_ind_figure(self, ch: int):
         plt = self._plt
-        N   = self._upsample_n
+        if plt is None:
+            raise RuntimeError("matplotlib pyplot not initialised")
+        N = self._upsample_n
         init_z = np.zeros((N, N), dtype=np.float32)
 
         fig = plt.figure(figsize=(10, 4))
-        fig.suptitle(f'ToF CH{ch} — Heatmap + Surface', fontsize=10)
+        fig.suptitle(f"ToF CH{ch} — Heatmap + Surface", fontsize=10)
 
         ax_h = fig.add_subplot(1, 2, 1)
-        im   = ax_h.imshow(init_z, origin='lower', aspect='equal',
-                            vmin=0, vmax=TOF_MAX_RANGE_MM,
-                            cmap=_CH_CMAPS[ch % len(_CH_CMAPS)])
+        im = ax_h.imshow(
+            init_z,
+            origin="lower",
+            aspect="equal",
+            vmin=0,
+            vmax=TOF_MAX_RANGE_MM,
+            cmap=_CH_CMAPS[ch % len(_CH_CMAPS)],
+        )
         plt.colorbar(im, ax=ax_h, fraction=0.046, pad=0.04)
 
-        ax_s = fig.add_subplot(1, 2, 2, projection='3d')
-        ax_s.set_xlabel('X')
-        ax_s.set_ylabel('Y')
-        ax_s.set_zlabel('mm')
-        surf = ax_s.plot_surface(self._XN, self._YN, init_z,
-                                  rstride=2, cstride=2,
-                                  linewidth=0, antialiased=True)
+        ax_s = fig.add_subplot(1, 2, 2, projection="3d")
+        ax_s.set_xlabel("X")
+        ax_s.set_ylabel("Y")
+        ax_s.set_zlabel("mm")
+        surf = ax_s.plot_surface(
+            self._XN,
+            self._YN,
+            init_z,
+            rstride=2,
+            cstride=2,
+            linewidth=0,
+            antialiased=True,
+        )
 
-        fig.canvas.mpl_connect('key_press_event', self._on_key)
+        fig.canvas.mpl_connect("key_press_event", self._on_key)
         fig.tight_layout()
         return fig, ax_h, ax_s, im, surf
 
     # ── Animation callback ────────────────────────────────────────────────
 
     def _update(self, _frame):
+        plt = self._plt
+        if plt is None:
+            return list(self._imshows)
+
         snap = self._state.snapshot()
-        N    = self._upsample_n
+        N = self._upsample_n
 
         for ch in range(self._num_ch):
-            grid = snap['grids'][ch]
+            grid = snap["grids"][ch]
 
             if np.isnan(grid).all():
                 zN = np.zeros((N, N), dtype=np.float32)
-                suffix = 'NO DATA'
+                suffix = "NO DATA"
             else:
                 zN = _upsample_bilinear(grid, N)
-                suffix = 'LIVE'
+                suffix = "LIVE"
 
             # Main figure heatmap
             self._imshows[ch].set_data(zN)
 
-            age = (time.time() - snap['last_rx'][ch]) if snap['last_rx'][ch] > 0 else 999
+            age = (
+                (time.time() - snap["last_rx"][ch]) if snap["last_rx"][ch] > 0 else 999
+            )
             self._ax_heat[ch].set_title(
                 f'CH{ch} {suffix} | f={snap["frame_cnt"][ch]} | {age:.1f}s',
                 fontsize=8,
@@ -428,49 +511,69 @@ class ToFPlotter:
                 except Exception:
                     pass
                 self._surfaces[ch] = self._ax_surf[ch].plot_surface(
-                    self._XN, self._YN, zN,
-                    rstride=2, cstride=2, linewidth=0, antialiased=True,
+                    self._XN,
+                    self._YN,
+                    zN,
+                    rstride=2,
+                    cstride=2,
+                    linewidth=0,
+                    antialiased=True,
                 )
 
             # Pop-out update
             fig = self._ind_figs[ch]
-            if fig is not None and self._plt.fignum_exists(fig.number):
-                self._ind_ims[ch].set_data(zN)
+            if fig is not None and plt.fignum_exists(figure_number(fig)):
+                im_ind = self._ind_ims[ch]
+                if im_ind is not None:
+                    im_ind.set_data(zN)
                 if self._draw_count[ch] % self._surface_every == 0:
-                    try:
-                        self._ind_surfs[ch].remove()
-                    except Exception:
-                        pass
-                    self._ind_surfs[ch] = self._ind_ax_s[ch].plot_surface(
-                        self._XN, self._YN, zN,
-                        rstride=2, cstride=2, linewidth=0, antialiased=True,
-                    )
+                    surf_ind = self._ind_surfs[ch]
+                    if surf_ind is not None:
+                        try:
+                            surf_ind.remove()
+                        except Exception:
+                            pass
+                    ax_s = self._ind_ax_s[ch]
+                    if ax_s is not None:
+                        self._ind_surfs[ch] = ax_s.plot_surface(
+                            self._XN,
+                            self._YN,
+                            zN,
+                            rstride=2,
+                            cstride=2,
+                            linewidth=0,
+                            antialiased=True,
+                        )
                 fig.canvas.draw_idle()
             elif fig is not None:
                 # Window closed by user
-                self._ind_figs[ch]  = None
-                self._ind_ax_h[ch]  = None
-                self._ind_ax_s[ch]  = None
-                self._ind_ims[ch]   = None
+                self._ind_figs[ch] = None
+                self._ind_ax_h[ch] = None
+                self._ind_ax_s[ch] = None
+                self._ind_ims[ch] = None
                 self._ind_surfs[ch] = None
 
         # Status text: obstacle + IR
-        obs   = snap['obstacle_response']
-        ir    = snap['ir_label']
-        dist  = snap['obstacle_dist_mm']
-        thresh = snap['tof_threshold_mm']
+        obs = snap["obstacle_response"]
+        ir = snap["ir_label"]
+        dist = snap["obstacle_dist_mm"]
+        thresh = snap["tof_threshold_mm"]
 
-        if obs == 'back_away':
-            status = f'*** IR: {ir} — BACK AWAY (ToF missed!) ***'
-            self._status_txt.set_color('red')
-        elif obs == 'replan':
-            status = f'ToF: {dist:.0f} mm < {thresh:.0f} mm threshold — REPLAN TRAJECTORY'
-            self._status_txt.set_color('orange')
-        else:
-            status = f'Clear | IR: {ir} | Threshold: {thresh:.0f} mm'
-            self._status_txt.set_color('green')
-
-        self._status_txt.set_text(status)
+        st = self._status_txt
+        if st is not None:
+            if obs == "back_away":
+                status = f"*** IR: {ir} — BACK AWAY (ToF missed!) ***"
+                st.set_color("red")
+            elif obs == "replan":
+                status = (
+                    f"ToF: {dist:.0f} mm < {thresh:.0f} mm threshold "
+                    f"— REPLAN TRAJECTORY"
+                )
+                st.set_color("orange")
+            else:
+                status = f"Clear | IR: {ir} | Threshold: {thresh:.0f} mm"
+                st.set_color("green")
+            st.set_text(status)
 
         # CSV logging
         with self._log_lock:
@@ -479,18 +582,21 @@ class ToFPlotter:
             try:
                 ts = datetime.now().isoformat()
                 for ch in range(self._num_ch):
-                    g = snap['grids'][ch]
+                    g = snap["grids"][ch]
                     g_valid = g[~np.isnan(g)]
                     if g_valid.size > 0:
-                        writer.writerow([
-                            ts, ch,
-                            f'{np.min(g_valid):.1f}',
-                            f'{np.mean(g_valid):.1f}',
-                            f'{np.max(g_valid):.1f}',
-                            snap['ir_bits'],
-                            snap['ir_label'],
-                            snap['obstacle_response'],
-                        ])
+                        writer.writerow(
+                            [
+                                ts,
+                                ch,
+                                f"{np.min(g_valid):.1f}",
+                                f"{np.mean(g_valid):.1f}",
+                                f"{np.max(g_valid):.1f}",
+                                snap["ir_bits"],
+                                snap["ir_label"],
+                                snap["obstacle_response"],
+                            ]
+                        )
             except Exception:
                 with self._log_lock:
                     self._close_log()
@@ -505,26 +611,28 @@ class ToFPlotter:
         if plt is None:
             return
         fig = self._ind_figs[ch]
-        if fig is not None and plt.fignum_exists(fig.number):
+        if fig is not None and plt.fignum_exists(figure_number(fig)):
             plt.close(fig)
-            self._ind_figs[ch]  = None
-            self._ind_ax_h[ch]  = None
-            self._ind_ax_s[ch]  = None
-            self._ind_ims[ch]   = None
+            self._ind_figs[ch] = None
+            self._ind_ax_h[ch] = None
+            self._ind_ax_s[ch] = None
+            self._ind_ims[ch] = None
             self._ind_surfs[ch] = None
         else:
             f, ah, a_s, im, surf = self._build_ind_figure(ch)
-            self._ind_figs[ch]  = f
-            self._ind_ax_h[ch]  = ah
-            self._ind_ax_s[ch]  = a_s
-            self._ind_ims[ch]   = im
+            self._ind_figs[ch] = f
+            self._ind_ax_h[ch] = ah
+            self._ind_ax_s[ch] = a_s
+            self._ind_ims[ch] = im
             self._ind_surfs[ch] = surf
 
     def _toggle_main_window(self):
         if self._fig is None:
             return
         try:
-            win = self._fig.canvas.manager.window
+            win = getattr(self._fig.canvas.manager, "window", None)
+            if win is None:
+                return
             try:
                 self._set_main_visible(not win.winfo_ismapped())
                 return
@@ -541,7 +649,9 @@ class ToFPlotter:
         if self._fig is None:
             return
         try:
-            win = self._fig.canvas.manager.window
+            win = getattr(self._fig.canvas.manager, "window", None)
+            if win is None:
+                return
             try:
                 if visible:
                     win.deiconify()
@@ -563,29 +673,31 @@ class ToFPlotter:
     # ── Keyboard ──────────────────────────────────────────────────────────
 
     def _on_key(self, event):
-        key = (event.key or '').lower()
+        key = (event.key or "").lower()
 
-        if key == 'u':
+        if key == "u":
             # Reset frame counters
             with self._state._lock:
                 for ch in range(self._num_ch):
                     self._state.frame_cnt[ch] = 0
                     self._draw_count[ch] = 0
-        elif key == 'y':
+        elif key == "y":
             self.save_screenshot()
-        elif key == 't':
+        elif key == "t":
             self.toggle_logging()
-        elif key == 'c':
+        elif key == "c":
             self.export_csv_snapshot()
-        elif key == '0':
+        elif key == "0":
             self._toggle_main_window()
-        elif key in ('1', '2', '3', '4'):
+        elif key in ("1", "2", "3", "4"):
             self._toggle_ind_window(int(key) - 1)
-        elif key in ('+', '='):
+        elif key in ("+", "="):
             with self._state._lock:
                 self._state.tof_threshold_mm = min(
-                    3000.0, self._state.tof_threshold_mm + 50.0)
-        elif key in ('-', '_'):
+                    3000.0, self._state.tof_threshold_mm + 50.0
+                )
+        elif key in ("-", "_"):
             with self._state._lock:
                 self._state.tof_threshold_mm = max(
-                    50.0, self._state.tof_threshold_mm - 50.0)
+                    50.0, self._state.tof_threshold_mm - 50.0
+                )

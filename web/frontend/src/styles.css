@@ -15,7 +15,7 @@ body,
 
 .app-shell {
   display: grid;
-  grid-template-columns: 280px 1fr 280px;
+  grid-template-columns: 480px 1fr 280px;
   grid-template-rows: 48px 1fr;
   height: 100vh;
   width: 100vw;
@@ -38,8 +38,132 @@ body,
 .app-shell__left {
   grid-area: left;
   border-right: 1px solid #252a33;
-  overflow: auto;
-  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app-shell__left-header {
+  padding: 8px 12px;
+  border-bottom: 1px solid #252a33;
+  background: #131720;
+}
+
+.app-shell__left-workspace {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+}
+
+.blockly-workspace {
+  width: 100%;
+  height: 100%;
+}
+
+.run-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.run-controls button {
+  background: #1f2937;
+  color: #e6e6e6;
+  border: 1px solid #374151;
+  border-radius: 4px;
+  padding: 4px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.run-controls button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.run-controls button:hover:not(:disabled) {
+  background: #2b3442;
+}
+
+.run-controls__error {
+  color: #ef4444;
+  font-size: 12px;
+}
+
+.run-controls__validation.ok {
+  color: #22c55e;
+  font-size: 12px;
+}
+
+.run-controls__validation.bad {
+  color: #facc15;
+  font-size: 12px;
+}
+
+.manual-joint-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 16px;
+}
+
+.manual-joint-row {
+  display: grid;
+  grid-template-columns: 36px 1fr 44px;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.manual-joint-row input[type="range"] {
+  width: 100%;
+}
+
+.manual-joint-name {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.manual-joint-name input {
+  flex: 1;
+  background: #0f141b;
+  color: #e6e6e6;
+  border: 1px solid #374151;
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+
+.manual-joint-panel button {
+  margin-top: 6px;
+  background: #1d4ed8;
+  color: #fff;
+  border: 0;
+  border-radius: 4px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.manual-joint-panel button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.manual-joint-error {
+  color: #ef4444;
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.manual-joint-message {
+  color: #22c55e;
+  font-size: 12px;
+  margin-top: 4px;
 }
 
 .app-shell__viewer {

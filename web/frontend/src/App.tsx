@@ -1,20 +1,24 @@
-// App.tsx — Phase 4 top-level layout.
+// App.tsx — Phase 5 top-level layout.
 //
 // Three columns:
-//   left    — state library panel (placeholder, filled in Phase 5)
-//   center  — Three.js viewer with Scene + Arm + SensorRays + Obstacles
-//   right   — live telemetry readouts (joints, ToF, IR, status)
+//   left    — Run controls + Blockly workspace (Phase 5)
+//   center  — Three.js viewer (Phase 4)
+//   right   — live telemetry readouts + Manual Joint Panel (Phase 5)
 //
 // The WebSocket subscription lives outside React so StrictMode's
 // double-mount cannot open two sockets. We kick it off from a
 // top-level effect and tear it down on unmount.
 
-import { useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Scene } from "./viewer/Scene";
 import { Arm } from "./viewer/Arm";
 import { SensorRays } from "./viewer/SensorRays";
 import { Obstacles } from "./viewer/Obstacles";
 import { startTelemetry, useTelemetryStore } from "./state/telemetry";
+import { BlocklyEditor } from "./editor/BlocklyEditor";
+import { RunControls } from "./editor/RunControls";
+import { ManualJointPanel } from "./editor/ManualJointPanel";
+import { api } from "./state/api";
 
 export function App() {
   useEffect(() => startTelemetry(), []);
@@ -24,6 +28,24 @@ export function App() {
   const tof = useTelemetryStore((s) => s.tof);
   const ir = useTelemetryStore((s) => s.ir);
   const status = useTelemetryStore((s) => s.status);
+
+  const [code, setCode] = useState<string>("");
+  const [savedStates, setSavedStates] = useState<string[]>(["HOME"]);
+
+  const refreshSavedStates = useCallback(async () => {
+    try {
+      const entries = await api.listStates();
+      const names = entries.map((e) => e.name);
+      setSavedStates(names.length > 0 ? names : ["HOME"]);
+    } catch {
+      // Leave the existing list alone on error — the backend may not
+      // be running (e.g. under `npm run test:watch`).
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshSavedStates();
+  }, [refreshSavedStates]);
 
   return (
     <div className="app-shell">
@@ -44,9 +66,15 @@ export function App() {
       </header>
 
       <aside className="app-shell__left">
-        <div className="panel-heading">Saved States</div>
-        <div style={{ color: "#9ca3af", fontSize: 13 }}>
-          Phase 5 will add a live list + "load into workspace" buttons.
+        <div className="app-shell__left-header">
+          <div className="panel-heading">Blocks</div>
+          <RunControls code={code} />
+        </div>
+        <div className="app-shell__left-workspace">
+          <BlocklyEditor
+            savedStates={savedStates}
+            onCodeChange={setCode}
+          />
         </div>
       </aside>
 
@@ -80,6 +108,8 @@ export function App() {
           <span>severity</span>
           <span>{ir}</span>
         </div>
+
+        <ManualJointPanel onStateSaved={() => void refreshSavedStates()} />
       </aside>
     </div>
   );

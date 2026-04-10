@@ -301,3 +301,76 @@ def test_websocket_reflects_live_joint_changes(client):
                 seen_stow = True
                 break
         assert seen_stow, "never observed STOW_COMPACT joints on the stream"
+
+
+# ── Phase 7: deploy mode endpoints ─────────────────────────────────────
+
+
+def test_health_reports_mode(client):
+    body = client.get("/health").json()
+    assert body["mode"] == "sim"
+
+
+def test_get_mode_default_is_sim(client):
+    resp = client.get("/mode")
+    assert resp.status_code == 200
+    assert resp.json() == {"mode": "sim"}
+
+
+def test_post_mode_rejects_unknown_value(client):
+    resp = client.post("/mode", json={"mode": "moon"})
+    assert resp.status_code == 400
+    assert "moon" in resp.json()["detail"]
+    # Mode unchanged.
+    assert client.get("/mode").json() == {"mode": "sim"}
+
+
+def test_post_mode_to_hardware_without_factory_returns_503(client):
+    # The default client fixture uses the default factory, which
+    # refuses to build a hardware backend without a serial port.
+    resp = client.post("/mode", json={"mode": "hardware"})
+    assert resp.status_code == 503
+    # Mode unchanged — the bridge restored the previous backend.
+    assert client.get("/mode").json() == {"mode": "sim"}
+    # And the backend still accepts commands.
+    assert client.get("/health").json()["backend_open"] is True
+
+
+def test_post_mode_sim_to_sim_is_idempotent(client):
+    resp = client.post("/mode", json={"mode": "sim"})
+    assert resp.status_code == 200
+    assert resp.json() == {"mode": "sim"}
+
+
+def test_post_mode_round_trip_with_factory(client_with_factory):
+    c = client_with_factory
+    # Starts in sim.
+    assert c.get("/mode").json() == {"mode": "sim"}
+
+    # Flip to hardware.
+    resp = c.post("/mode", json={"mode": "hardware"})
+    assert resp.status_code == 200
+    assert resp.json() == {"mode": "hardware"}
+    assert c.get("/mode").json() == {"mode": "hardware"}
+    assert c.get("/health").json()["mode"] == "hardware"
+    assert c.get("/health").json()["backend_open"] is True
+
+    # Flip back to sim.
+    resp = c.post("/mode", json={"mode": "sim"})
+    assert resp.status_code == 200
+    assert resp.json() == {"mode": "sim"}
+    assert c.get("/mode").json() == {"mode": "sim"}
+    # Backend still accepts DSL runs after the swap.
+    run = c.post("/dsl/run", json={"text": "MOVE HOME_REST WAIT 5"})
+    assert run.status_code == 200
+    assert run.json()["started"] is True
+
+
+def test_post_mode_swap_preserves_state_library(client_with_factory):
+    c = client_with_factory
+    # HOME_REST was seeded by conftest and should survive a mode swap.
+    assert c.get("/states/HOME_REST").status_code == 200
+    c.post("/mode", json={"mode": "hardware"})
+    assert c.get("/states/HOME_REST").status_code == 200
+    c.post("/mode", json={"mode": "sim"})
+    assert c.get("/states/HOME_REST").status_code == 200

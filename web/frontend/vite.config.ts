@@ -18,6 +18,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/health": BACKEND_ORIGIN,
+      "/mode": BACKEND_ORIGIN,
       "/urdf": BACKEND_ORIGIN,
       "/states": BACKEND_ORIGIN,
       "/sequences": BACKEND_ORIGIN,

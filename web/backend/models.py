@@ -121,6 +121,28 @@ class IrPokeRequest(BaseModel):
     severity: int = Field(..., ge=0, le=3)
 
 
+# ── Mode switching (Phase 7) ──────────────────────────────────────────
+
+
+class ModeResponse(BaseModel):
+    """
+    Current deploy mode reported by ``GET /mode`` and the success
+    case of ``POST /mode``.
+
+    ``mode`` is one of the strings from ``bridge.VALID_MODES`` —
+    currently "sim" or "hardware". The frontend banner uses the
+    string verbatim to decide its styling + copy.
+    """
+
+    mode: str = Field(..., description='Active backend mode: "sim" or "hardware".')
+
+
+class SetModeRequest(BaseModel):
+    """Body for ``POST /mode``."""
+
+    mode: str = Field(..., description='Target backend mode: "sim" or "hardware".')
+
+
 __all__ = [
     "StateEntry",
     "StateListResponse",
@@ -137,4 +159,6 @@ __all__ = [
     "TelemetryFrame",
     "TofPokeRequest",
     "IrPokeRequest",
+    "ModeResponse",
+    "SetModeRequest",
 ]

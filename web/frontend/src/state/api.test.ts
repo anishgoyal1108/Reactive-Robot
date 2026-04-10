@@ -226,3 +226,43 @@ describe("ApiClient error surfacing", () => {
     await expect(api.getState("MISSING")).rejects.toThrow(/unknown state/);
   });
 });
+
+// ── Phase 7: deploy mode ──────────────────────────────────────────────
+
+describe("ApiClient.getMode / setMode", () => {
+  it("getMode returns the current mode string", async () => {
+    const { calls, fetchImpl } = makeStub({ "/mode": { mode: "sim" } });
+    const api = new ApiClient({ fetchImpl });
+    expect(await api.getMode()).toBe("sim");
+    expect(calls[0].url).toBe("/mode");
+    expect(calls[0].init).toBeUndefined();
+  });
+
+  it("setMode POSTs the target mode and returns the applied value", async () => {
+    const { calls, fetchImpl } = makeStub({
+      "/mode": { mode: "hardware" },
+    });
+    const api = new ApiClient({ fetchImpl });
+    const applied = await api.setMode("hardware");
+    expect(applied).toBe("hardware");
+    expect(calls[0].url).toBe("/mode");
+    expect(calls[0].init?.method).toBe("POST");
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+      mode: "hardware",
+    });
+  });
+
+  it("setMode surfaces backend 400 errors", async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ detail: "invalid mode 'moon'" }), {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        }),
+    ) as unknown as typeof fetch;
+    const api = new ApiClient({ fetchImpl });
+    await expect(
+      api.setMode("moon" as unknown as "sim"),
+    ).rejects.toThrow(/invalid mode/);
+  });
+});

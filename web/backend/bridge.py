@@ -59,6 +59,47 @@ from braccio_ctrl.state_library import StateLibrary
 from .web_backend import WebBackend
 
 
+# ── Mode constants ─────────────────────────────────────────────────────
+#
+# Phase 7's "Run on sim / Run on hardware" toggle. The bridge exposes
+# these as its public mode names; the frontend uses them verbatim when
+# calling POST /mode.
+MODE_SIM = "sim"
+MODE_HARDWARE = "hardware"
+VALID_MODES = (MODE_SIM, MODE_HARDWARE)
+
+# Type of the factory the bridge uses to mint a backend for a given
+# mode. Tests override this with a factory that returns a fresh
+# WebBackend for each mode (so the "hardware" branch doesn't actually
+# need a serial port).
+BackendFactory = Callable[[str], BraccioBackend]
+
+
+def default_backend_factory(mode: str) -> BraccioBackend:
+    """
+    Default factory used when no override is supplied.
+
+    * ``sim``      → ``WebBackend`` (in-memory, no PyBullet load).
+    * ``hardware`` → raises ``RuntimeError`` — production deployments
+      must wire a ``SerialBridge``-based factory through
+      ``WebBridge(backend_factory=...)`` because the FastAPI process
+      does not know the user's serial port up front.
+
+    Tests and the default FastAPI app never hit the hardware branch
+    because they either preserve the existing backend or supply their
+    own factory.
+    """
+    if mode == MODE_SIM:
+        return WebBackend()
+    if mode == MODE_HARDWARE:
+        raise RuntimeError(
+            "hardware mode requires a backend_factory that constructs "
+            "a SerialBridge (the default factory cannot open a serial "
+            "port without knowing the device path)"
+        )
+    raise ValueError(f"unknown backend mode: {mode!r}")
+
+
 _TOKEN_TO_IDX: Dict[str, int] = {tok: i for i, tok in enumerate(JOINT_TOKENS)}
 
 
@@ -193,13 +234,39 @@ class WebBridge:
 
     Construction parameters
     -----------------------
-    backend      : BraccioBackend (defaults to a fresh WebBackend)
-    state_lib    : StateLibrary  (defaults to the committed states.json)
-    sequences_dir: Path           (defaults to web/backend/sequences/)
+    backend         : BraccioBackend (defaults to a fresh WebBackend)
+    state_lib       : StateLibrary   (defaults to the committed states.json)
+    sequences_dir   : Path           (defaults to web/backend/sequences/)
+    mode            : str            ("sim" | "hardware"). Sets the
+                      initial mode label reported via ``current_mode``
+                      and POST /mode. Does NOT select the ``backend``
+                      argument — the caller passes that explicitly so
+                      tests stay in control.
+    backend_factory : BackendFactory (defaults to ``default_backend_factory``)
+                      Used by ``set_mode`` to construct a fresh backend
+                      when the user flips between sim and hardware.
+                      Production deploys that want "Deploy to hardware"
+                      to actually reach a real arm must supply a factory
+                      that knows the serial port.
 
     The constructor opens the backend immediately so the server is
     ready to accept commands at import time. ``close()`` should be
     called from the FastAPI shutdown event.
+
+    ─── Safety caveat (Phase 7) ──────────────────────────────────────
+    ``MotionGuard`` is NOT in the web backend command path. Every
+    motion issued through ``BackendExecutor`` goes straight to the
+    backend's ``send_cmd`` with no synchronous obstacle re-check, so
+    web sequences rely entirely on whatever reactive safety the
+    underlying backend provides. ``SimBackend`` has the virtual ToF
+    loop, and ``SerialBridge`` has none at all. The curses
+    ``controller.py`` is the only place where every command goes
+    through ``MotionGuard.plan_clear_pose``. See the
+    ``feedback_synchronous_safety.md`` memory entry — flipping the
+    mode toggle to "hardware" here does not give you the curses
+    controller's chokepoint. If that matters for a given deployment,
+    run the arm from the curses controller instead and use this UI
+    only against the sim.
     """
 
     def __init__(
@@ -207,13 +274,25 @@ class WebBridge:
         backend: Optional[BraccioBackend] = None,
         state_lib: Optional[StateLibrary] = None,
         sequences_dir: Optional[Path] = None,
+        mode: str = MODE_SIM,
+        backend_factory: Optional[BackendFactory] = None,
     ) -> None:
+        if mode not in VALID_MODES:
+            raise ValueError(
+                f"invalid mode {mode!r}; must be one of {VALID_MODES}"
+            )
         self._backend: BraccioBackend = backend or WebBackend()
         self._state_lib: StateLibrary = state_lib or StateLibrary()
         self._sequences_dir: Path = (
             sequences_dir or Path(__file__).resolve().parent / "sequences"
         )
         self._sequences_dir.mkdir(parents=True, exist_ok=True)
+
+        self._mode: str = mode
+        self._backend_factory: BackendFactory = (
+            backend_factory or default_backend_factory
+        )
+        self._mode_lock = threading.RLock()
 
         # Currently-running interpreter + thread.
         self._run_lock = threading.RLock()
@@ -254,6 +333,79 @@ class WebBridge:
     @property
     def sequences_dir(self) -> Path:
         return self._sequences_dir
+
+    @property
+    def current_mode(self) -> str:
+        """Return the active mode label ("sim" or "hardware")."""
+        with self._mode_lock:
+            return self._mode
+
+    # ── Mode switching ───────────────────────────────────────────────────
+
+    def set_mode(self, mode: str) -> Tuple[bool, str]:
+        """
+        Swap the active backend to match *mode*.
+
+        Steps:
+          1. Reject unknown mode values early.
+          2. If already in the requested mode, return without touching
+             the backend (idempotent).
+          3. Stop any in-flight sequence (safer than tearing the
+             backend out from under a running interpreter).
+          4. Close the current backend.
+          5. Mint a new one via ``backend_factory``. If that raises,
+             restore the previous backend so the server stays usable
+             even when the user tried to flip to a mode the factory
+             cannot satisfy (e.g. no serial port attached).
+          6. Connect the new backend and swap it in under the lock.
+
+        Returns ``(ok, detail)``. ``detail`` is a human-readable error
+        message on failure and an empty string on success.
+        """
+        if mode not in VALID_MODES:
+            return False, f"invalid mode {mode!r}; must be one of {VALID_MODES}"
+
+        with self._mode_lock:
+            if mode == self._mode:
+                return True, ""
+
+            # Don't pull the rug out from under a running interpreter.
+            self.stop_sequence()
+
+            old_backend = self._backend
+            try:
+                old_backend.close()
+            except Exception:
+                # Closing the old backend must never block the swap —
+                # at worst we leak one WebBackend which is harmless.
+                pass
+
+            try:
+                new_backend = self._backend_factory(mode)
+            except Exception as exc:
+                # Factory blew up — keep the old backend so the server
+                # stays functional. We have to re-open it since we
+                # closed it above.
+                try:
+                    old_backend.connect()
+                except Exception:
+                    pass
+                self._backend = old_backend
+                return False, f"failed to construct {mode} backend: {exc}"
+
+            try:
+                new_backend.connect()
+            except Exception as exc:
+                try:
+                    old_backend.connect()
+                except Exception:
+                    pass
+                self._backend = old_backend
+                return False, f"failed to connect {mode} backend: {exc}"
+
+            self._backend = new_backend
+            self._mode = mode
+            return True, ""
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -500,4 +652,12 @@ class WebBridge:
         )
 
 
-__all__ = ["WebBridge", "BackendExecutor"]
+__all__ = [
+    "WebBridge",
+    "BackendExecutor",
+    "MODE_SIM",
+    "MODE_HARDWARE",
+    "VALID_MODES",
+    "BackendFactory",
+    "default_backend_factory",
+]

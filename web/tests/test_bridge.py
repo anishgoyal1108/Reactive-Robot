@@ -360,3 +360,266 @@ def test_backend_executor_read_joint_reflects_backend(tmp_path):
         assert exe.read_joint("B") == 45
     finally:
         br.close()
+
+
+# ── Phase 7: deploy mode (sim ↔ hardware swap) ─────────────────────────
+
+
+def test_bridge_default_mode_is_sim(tmp_path):
+    br = _new_bridge(tmp_path)
+    try:
+        assert br.current_mode == "sim"
+    finally:
+        br.close()
+
+
+def test_bridge_explicit_mode_constructor(tmp_path):
+    sl = StateLibrary(path=str(tmp_path / "states.json"))
+    sl.save_state(
+        "HOME_REST",
+        {
+            "joints": [90, 90, 90, 90, 90, 73],
+            "theta": 0.0,
+            "r": 0.0,
+            "z": 0.0,
+            "wrist_offset": 0.0,
+            "wrist_rot": 0,
+            "gripper": 73,
+        },
+    )
+    br = WebBridge(
+        backend=WebBackend(),
+        state_lib=sl,
+        sequences_dir=tmp_path / "sequences",
+        mode="hardware",
+    )
+    try:
+        assert br.current_mode == "hardware"
+    finally:
+        br.close()
+
+
+def test_bridge_rejects_unknown_mode_in_constructor(tmp_path):
+    sl = StateLibrary(path=str(tmp_path / "states.json"))
+    with pytest.raises(ValueError):
+        WebBridge(
+            backend=WebBackend(),
+            state_lib=sl,
+            sequences_dir=tmp_path / "sequences",
+            mode="moon",
+        )
+
+
+def test_set_mode_same_mode_is_noop(tmp_path):
+    # Calling set_mode("sim") when already in sim must not construct a
+    # new backend — we verify by checking the identity is preserved.
+    br = _new_bridge(tmp_path)
+    try:
+        original = br.backend
+        ok, detail = br.set_mode("sim")
+        assert ok is True
+        assert detail == ""
+        assert br.backend is original
+    finally:
+        br.close()
+
+
+def test_set_mode_rejects_unknown_value(tmp_path):
+    br = _new_bridge(tmp_path)
+    try:
+        ok, detail = br.set_mode("moon")
+        assert ok is False
+        assert "moon" in detail
+        # State unchanged.
+        assert br.current_mode == "sim"
+    finally:
+        br.close()
+
+
+def test_set_mode_swap_via_factory(tmp_path):
+    """A test-supplied factory returns a fresh WebBackend for both modes."""
+
+    created: list[WebBackend] = []
+
+    def factory(mode: str) -> WebBackend:
+        be = WebBackend()
+        created.append(be)
+        return be
+
+    sl = StateLibrary(path=str(tmp_path / "states.json"))
+    sl.save_state(
+        "HOME_REST",
+        {
+            "joints": [90, 90, 90, 90, 90, 73],
+            "theta": 0.0,
+            "r": 0.0,
+            "z": 0.0,
+            "wrist_offset": 0.0,
+            "wrist_rot": 0,
+            "gripper": 73,
+        },
+    )
+    br = WebBridge(
+        backend=WebBackend(),
+        state_lib=sl,
+        sequences_dir=tmp_path / "sequences",
+        backend_factory=factory,
+    )
+    try:
+        initial_backend = br.backend
+        ok, detail = br.set_mode("hardware")
+        assert ok is True
+        assert detail == ""
+        assert br.current_mode == "hardware"
+        # A new backend was constructed via the factory.
+        assert len(created) == 1
+        assert br.backend is created[0]
+        assert br.backend is not initial_backend
+        # The new backend is connected so send_cmd works.
+        assert br.backend.is_open()
+        br.backend.send_cmd("HOME\n")
+        assert br.backend.joint_snapshot() == [90, 90, 90, 90, 90, 73]
+    finally:
+        br.close()
+
+
+def test_set_mode_round_trip_sim_hardware_sim(tmp_path):
+    def factory(mode: str) -> WebBackend:
+        return WebBackend()
+
+    sl = StateLibrary(path=str(tmp_path / "states.json"))
+    sl.save_state(
+        "HOME_REST",
+        {
+            "joints": [90, 90, 90, 90, 90, 73],
+            "theta": 0.0,
+            "r": 0.0,
+            "z": 0.0,
+            "wrist_offset": 0.0,
+            "wrist_rot": 0,
+            "gripper": 73,
+        },
+    )
+    br = WebBridge(
+        backend=WebBackend(),
+        state_lib=sl,
+        sequences_dir=tmp_path / "sequences",
+        backend_factory=factory,
+    )
+    try:
+        assert br.current_mode == "sim"
+        ok, _ = br.set_mode("hardware")
+        assert ok and br.current_mode == "hardware"
+        ok, _ = br.set_mode("sim")
+        assert ok and br.current_mode == "sim"
+        assert br.backend.is_open()
+    finally:
+        br.close()
+
+
+def test_set_mode_factory_failure_restores_previous_backend(tmp_path):
+    # If the factory raises, the bridge must keep the old backend
+    # functional so the server doesn't get bricked mid-swap.
+    def bad_factory(mode: str) -> WebBackend:
+        raise RuntimeError("no serial port attached")
+
+    sl = StateLibrary(path=str(tmp_path / "states.json"))
+    sl.save_state(
+        "HOME_REST",
+        {
+            "joints": [90, 90, 90, 90, 90, 73],
+            "theta": 0.0,
+            "r": 0.0,
+            "z": 0.0,
+            "wrist_offset": 0.0,
+            "wrist_rot": 0,
+            "gripper": 73,
+        },
+    )
+    br = WebBridge(
+        backend=WebBackend(),
+        state_lib=sl,
+        sequences_dir=tmp_path / "sequences",
+        backend_factory=bad_factory,
+    )
+    try:
+        original = br.backend
+        ok, detail = br.set_mode("hardware")
+        assert ok is False
+        assert "no serial port attached" in detail
+        # Old backend is still in place and still open.
+        assert br.backend is original
+        assert br.backend.is_open()
+        assert br.current_mode == "sim"
+        # And it still services commands.
+        br.backend.send_cmd("HOME\n")
+        assert br.backend.joint_snapshot() == [90, 90, 90, 90, 90, 73]
+    finally:
+        br.close()
+
+
+def test_set_mode_stops_running_sequence_before_swap(tmp_path):
+    # A sequence running against the current backend must be torn
+    # down before we swap — otherwise the worker thread would issue
+    # send_cmd calls against a closed backend.
+    def factory(mode: str) -> WebBackend:
+        return WebBackend()
+
+    sl = StateLibrary(path=str(tmp_path / "states.json"))
+    sl.save_state(
+        "HOME_REST",
+        {
+            "joints": [90, 90, 90, 90, 90, 73],
+            "theta": 0.0,
+            "r": 0.0,
+            "z": 0.0,
+            "wrist_offset": 0.0,
+            "wrist_rot": 0,
+            "gripper": 73,
+        },
+    )
+    br = WebBridge(
+        backend=WebBackend(),
+        state_lib=sl,
+        sequences_dir=tmp_path / "sequences",
+        backend_factory=factory,
+    )
+    try:
+        # A long-running program: many REPEAT iterations of WAIT so we
+        # can observe the transition from running → stopped.
+        started, errs = br.run_program("REPEAT 1000 { WAIT 50 }\n")
+        assert started, errs
+        # A freshly-started interpreter needs a beat before ``running``
+        # flips on; poll briefly instead of asserting instantaneously.
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and not br.is_running():
+            time.sleep(0.02)
+        assert br.is_running()
+
+        ok, _ = br.set_mode("hardware")
+        assert ok is True
+        # set_mode must have stopped the sequence synchronously.
+        assert not br.is_running()
+    finally:
+        br.close()
+
+
+def test_default_backend_factory_sim_returns_web_backend():
+    from web.backend.bridge import default_backend_factory
+
+    be = default_backend_factory("sim")
+    assert isinstance(be, WebBackend)
+
+
+def test_default_backend_factory_hardware_raises():
+    from web.backend.bridge import default_backend_factory
+
+    with pytest.raises(RuntimeError, match="hardware mode requires"):
+        default_backend_factory("hardware")
+
+
+def test_default_backend_factory_unknown_raises():
+    from web.backend.bridge import default_backend_factory
+
+    with pytest.raises(ValueError, match="unknown backend mode"):
+        default_backend_factory("rocket")

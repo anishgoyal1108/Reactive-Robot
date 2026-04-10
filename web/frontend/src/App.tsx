@@ -1,9 +1,16 @@
-// App.tsx — Phase 5 top-level layout.
+// App.tsx — Phase 5+7 top-level layout.
 //
 // Three columns:
 //   left    — Run controls + Blockly workspace (Phase 5)
 //   center  — Three.js viewer (Phase 4)
 //   right   — live telemetry readouts + Manual Joint Panel (Phase 5)
+//             + Recorder panel (Phase 6)
+//
+// Phase 7 adds a deploy-mode banner in the topbar. Clicking it pops a
+// confirmation modal — flipping to hardware is a blast-radius action
+// (moving a real arm), so the frontend deliberately makes it two
+// clicks and shows a safety warning about MotionGuard not being in
+// the web backend path.
 //
 // The WebSocket subscription lives outside React so StrictMode's
 // double-mount cannot open two sockets. We kick it off from a
@@ -19,7 +26,8 @@ import { BlocklyEditor } from "./editor/BlocklyEditor";
 import { RunControls } from "./editor/RunControls";
 import { ManualJointPanel } from "./editor/ManualJointPanel";
 import { RecorderPanel } from "./recorder/RecorderPanel";
-import { api } from "./state/api";
+import { ModeBanner } from "./mode/ModeBanner";
+import { api, type DeployMode } from "./state/api";
 
 export function App() {
   useEffect(() => startTelemetry(), []);
@@ -32,6 +40,7 @@ export function App() {
 
   const [code, setCode] = useState<string>("");
   const [savedStates, setSavedStates] = useState<string[]>(["HOME"]);
+  const [mode, setMode] = useState<DeployMode>("sim");
 
   const refreshSavedStates = useCallback(async () => {
     try {
@@ -44,9 +53,19 @@ export function App() {
     }
   }, []);
 
+  const refreshMode = useCallback(async () => {
+    try {
+      setMode(await api.getMode());
+    } catch {
+      // Backend down — keep the last known value. Tests rely on this
+      // not blowing up the render tree.
+    }
+  }, []);
+
   useEffect(() => {
     void refreshSavedStates();
-  }, [refreshSavedStates]);
+    void refreshMode();
+  }, [refreshSavedStates, refreshMode]);
 
   return (
     <div className="app-shell">
@@ -59,6 +78,7 @@ export function App() {
           />
           Braccio Digital Twin
         </div>
+        <ModeBanner mode={mode} onModeChange={setMode} />
         <div>
           {status?.running
             ? `running: line ${status.line} (${status.kind})`
@@ -75,6 +95,7 @@ export function App() {
           <BlocklyEditor
             savedStates={savedStates}
             onCodeChange={setCode}
+            mode={mode}
           />
         </div>
       </aside>

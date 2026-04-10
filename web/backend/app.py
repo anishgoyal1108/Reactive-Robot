@@ -52,9 +52,10 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
-from .bridge import WebBridge
+from .bridge import VALID_MODES, WebBridge
 from .models import (
     IrPokeRequest,
+    ModeResponse,
     RunRequest,
     RunResponse,
     RunStatusResponse,
@@ -63,6 +64,7 @@ from .models import (
     SaveStateRequest,
     SequenceGetResponse,
     SequenceListResponse,
+    SetModeRequest,
     StateEntry,
     StateListResponse,
     TelemetryFrame,
@@ -137,7 +139,37 @@ def create_app(bridge: Optional[WebBridge] = None) -> FastAPI:
             "ok": True,
             "backend_open": br.backend.is_open(),
             "running": br.is_running(),
+            "mode": br.current_mode,
         }
+
+    # ── Deploy mode (sim ↔ hardware) ───────────────────────────────────
+    #
+    # Phase 7. The frontend banner calls GET /mode on page load and
+    # POSTs here when the user confirms the "Deploy to hardware"
+    # modal. The bridge swaps backends under its own lock and reports
+    # either success or a human-readable reason for refusal.
+
+    @app.get("/mode", response_model=ModeResponse)
+    def get_mode() -> ModeResponse:
+        return ModeResponse(mode=_bridge().current_mode)
+
+    @app.post("/mode", response_model=ModeResponse)
+    def set_mode(req: SetModeRequest) -> ModeResponse:
+        if req.mode not in VALID_MODES:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"invalid mode {req.mode!r}; must be one of "
+                    f"{list(VALID_MODES)}"
+                ),
+            )
+        ok, reason = _bridge().set_mode(req.mode)
+        if not ok:
+            # Factory failures (e.g. no serial port) come back as 503
+            # rather than 400 — the request was well-formed, the server
+            # just can't honor it right now.
+            raise HTTPException(status_code=503, detail=reason)
+        return ModeResponse(mode=_bridge().current_mode)
 
     # ── URDF (shared between twin + frontend viewer) ──────────────────
 

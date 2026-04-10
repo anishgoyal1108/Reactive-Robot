@@ -88,3 +88,33 @@ def client(bridge: WebBridge):
     app = create_app(bridge=bridge)
     with TestClient(app) as c:
         yield c
+
+
+@pytest.fixture
+def bridge_with_factory(
+    tmp_path: Path, fresh_state_lib: StateLibrary
+) -> Iterator[WebBridge]:
+    """
+    A WebBridge whose backend_factory returns a fresh WebBackend for
+    either mode. Used by the Phase 7 mode-swap tests so they can flip
+    sim ↔ hardware without needing a real serial port.
+    """
+    seq_dir = tmp_path / "sequences"
+    br = WebBridge(
+        backend=WebBackend(),
+        state_lib=fresh_state_lib,
+        sequences_dir=seq_dir,
+        backend_factory=lambda _mode: WebBackend(),
+    )
+    yield br
+    br.close()
+
+
+@pytest.fixture
+def client_with_factory(bridge_with_factory: WebBridge):
+    """TestClient variant whose bridge can swap between sim and hardware."""
+    from fastapi.testclient import TestClient
+
+    app = create_app(bridge=bridge_with_factory)
+    with TestClient(app) as c:
+        yield c

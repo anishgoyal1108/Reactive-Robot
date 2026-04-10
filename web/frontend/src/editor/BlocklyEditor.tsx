@@ -13,13 +13,20 @@ import * as Blockly from "blockly/core";
 import "blockly/blocks"; // built-in math/text/variables blocks
 import { defineBraccioBlocks, setSavedStates } from "./blocks";
 import { dslGenerator, workspaceToDsl } from "./dslGenerator";
-import { toolbox } from "./toolbox";
+import { buildToolbox } from "./toolbox";
+import type { DeployMode } from "../state/api";
 
 export interface BlocklyEditorProps {
   /** Called every time the generated DSL text changes. */
   onCodeChange?: (dsl: string) => void;
   /** Dropdown values for the "move to state" block. */
   savedStates?: readonly string[];
+  /**
+   * Active deploy mode. Controls whether the obstacle-definition
+   * block is shown in the Definitions category (hidden in hardware
+   * mode since the backend no-ops it).
+   */
+  mode?: DeployMode;
   /** Initial workspace serialization (JSON) — optional. */
   initialState?: Blockly.serialization.ISerializer | null;
 }
@@ -39,7 +46,7 @@ function ensureBlocksDefined(): void {
 }
 
 export function BlocklyEditor(props: BlocklyEditorProps): JSX.Element {
-  const { onCodeChange, savedStates } = props;
+  const { onCodeChange, savedStates, mode } = props;
   const targetRef = useRef<HTMLDivElement | null>(null);
   const workspaceRef = useRef<Blockly.WorkspaceSvg | null>(null);
 
@@ -49,6 +56,17 @@ export function BlocklyEditor(props: BlocklyEditorProps): JSX.Element {
     if (savedStates) setSavedStates(savedStates);
   }, [savedStates]);
 
+  // When the deploy mode changes, rebuild the toolbox and hand it
+  // back to the existing workspace. Running this in a separate effect
+  // (instead of adding ``mode`` to the mount effect's deps) avoids
+  // tearing down the Blockly workspace every time the user flips the
+  // deploy-mode banner, which would lose block state.
+  useEffect(() => {
+    const workspace = workspaceRef.current;
+    if (!workspace) return;
+    workspace.updateToolbox(buildToolbox(mode ?? "sim"));
+  }, [mode]);
+
   // Inject Blockly once on mount, dispose on unmount.
   useEffect(() => {
     const target = targetRef.current;
@@ -57,7 +75,7 @@ export function BlocklyEditor(props: BlocklyEditorProps): JSX.Element {
     ensureBlocksDefined();
 
     const workspace = Blockly.inject(target, {
-      toolbox,
+      toolbox: buildToolbox(mode ?? "sim"),
       renderer: "zelos",
       theme: Blockly.Themes.Classic,
       trashcan: true,

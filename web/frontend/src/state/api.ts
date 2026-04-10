@@ -24,6 +24,13 @@ export interface SaveSequenceResponse {
   errors: string[];
 }
 
+/** Phase 7 — backend deploy mode. */
+export type DeployMode = "sim" | "hardware";
+
+export interface ModeResponse {
+  mode: DeployMode;
+}
+
 export interface ApiClientOptions {
   /** Base URL prefix. Defaults to same-origin ("") for the Vite proxy. */
   baseUrl?: string;
@@ -50,7 +57,12 @@ export class ApiClient {
 
   // ── Health + URDF ──────────────────────────────────────────────
 
-  async health(): Promise<{ ok: boolean; backend_open: boolean; running: boolean }> {
+  async health(): Promise<{
+    ok: boolean;
+    backend_open: boolean;
+    running: boolean;
+    mode: DeployMode;
+  }> {
     return this.getJson("/health");
   }
 
@@ -60,6 +72,18 @@ export class ApiClient {
       throw new Error(`GET /urdf failed: ${resp.status}`);
     }
     return resp.text();
+  }
+
+  // ── Deploy mode (Phase 7) ──────────────────────────────────────
+
+  async getMode(): Promise<DeployMode> {
+    const body = await this.getJson<ModeResponse>("/mode");
+    return body.mode;
+  }
+
+  async setMode(mode: DeployMode): Promise<DeployMode> {
+    const body = await this.postJson<ModeResponse>("/mode", { mode });
+    return body.mode;
   }
 
   // ── State library ──────────────────────────────────────────────

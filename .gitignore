@@ -5,4 +5,5 @@ __pycache__/
 
 # Runtime artefacts — regenerated on every controller run
 braccio_main_runner/session_logs/
+web/backend/sequences/
 

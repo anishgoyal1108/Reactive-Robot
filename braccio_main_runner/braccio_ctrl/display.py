@@ -33,7 +33,10 @@ Layout
 
 import curses
 import numpy as np
-from .constants import JOINT_LIMITS, JOINT_NAMES, SENSOR_IGNORE_CHANNELS, SENSOR_ADVISORY_CHANNELS
+from .constants import (
+    JOINT_LIMITS, JOINT_NAMES,
+    SENSOR_ADVISORY_CHANNELS, SENSOR_IGNORE_CHANNELS,
+)
 
 # Color pair indices
 _C_TITLE   = 1
@@ -166,25 +169,61 @@ class CursesDisplay:
                           curses.color_pair(_C_LABEL) | curses.A_UNDERLINE)
         row += 1
 
-        # Per-channel summary: dist / threshold, with authority labels
+        # Serial link (distinct from “no valid ToF cells”)
+        if row < h - 1:
+            if not tof.get('connected'):
+                self._safe_addstr(
+                    row, 0,
+                    f"  SERIAL: not open  (expected port {tof.get('port', '?')!r})",
+                    curses.color_pair(_C_ERR) | curses.A_BOLD,
+                )
+                row += 1
+            else:
+                self._safe_addstr(
+                    row, 0,
+                    f"  SERIAL: OK  {tof.get('port', '')}",
+                    curses.color_pair(_C_OK),
+                )
+                row += 1
+
+        # Per-channel summary: CH0: 450mm  CH1: 320mm  CH2: --  CH3: 1200mm
         if row < h - 1:
             parts = []
             num_ch = tof.get('num_channels', 4)
-            thresholds = tof.get('tof_thresholds_mm', [300.0] * num_ch)
+            fcnt = tof.get('frame_cnt', [0] * num_ch)
+            thrv = tof.get('tof_thresholds_mm', [300.0] * num_ch)
+            vmin = tof.get('diag_raw_min_mm', [float('nan')] * num_ch)
+            vmax = tof.get('diag_raw_max_mm', [float('nan')] * num_ch)
+            vcel = tof.get('diag_valid_cells', [0] * num_ch)
+            zcnt = tof.get('diag_zone_count', [0] * num_ch)
+
             for ch in range(num_ch):
                 if ch in SENSOR_IGNORE_CHANNELS:
                     parts.append(f"CH{ch}:[ign]")
                     continue
                 grid = tof['grids'][ch]
-                thr  = thresholds[ch] if ch < len(thresholds) else 300.0
-                tag  = '(adv)' if ch in SENSOR_ADVISORY_CHANNELS else ''
+                thr = thrv[ch] if ch < len(thrv) else 300.0
+                suffix = "(adv)" if ch in SENSOR_ADVISORY_CHANNELS else ""
                 if np.isnan(grid).all():
-                    parts.append(f"CH{ch}:--/{thr:.0f}{tag}")
+                    if fcnt[ch] > 0 and zcnt[ch] > 0 and vcel[ch] == 0:
+                        # Frames parse but firmware marked every cell invalid
+                        r0 = vmin[ch] if ch < len(vmin) else float('nan')
+                        r1 = vmax[ch] if ch < len(vmax) else float('nan')
+                        if np.isfinite(r0) and np.isfinite(r1):
+                            rp = f'{r0:.0f}-{r1:.0f}'
+                        else:
+                            rp = '?'
+                        parts.append(f"CH{ch}:masked({rp})/{thr:.0f}{suffix}")
+                    elif fcnt[ch] > 0:
+                        parts.append(f"CH{ch}:no-cells/{thr:.0f}{suffix}")
+                    else:
+                        parts.append(f"CH{ch}:--/{thr:.0f}{suffix}")
                 else:
                     mn = float(np.nanmin(grid))
-                    flag = '!' if mn < thr else ' '
-                    parts.append(f"CH{ch}:{mn:.0f}/{thr:.0f}{tag}{flag}")
-            line = "  " + "  ".join(parts)
+                    flag = "!" if mn < thr else ""
+                    parts.append(f"CH{ch}:{mn:.0f}/{thr:.0f}{flag}{suffix}")
+            line = "  " + "   ".join(parts)
+
             self._safe_addstr(row, 0, line[:w - 1], curses.color_pair(_C_DIM))
             row += 1
 
@@ -215,7 +254,7 @@ class CursesDisplay:
                 attr = curses.color_pair(_C_ERR) | curses.A_BOLD | curses.A_BLINK
             elif obs == 'replan':
                 line = (f"  OBSTACLE: REPLAN ({src}, {dist:.0f}mm "
-                        f"< {thresh:.0f}mm threshold)")
+                        f"< {thresh:.0f}mm ch-threshold)")
                 attr = curses.color_pair(_C_WARN) | curses.A_BOLD
             else:
                 line = f"  Obstacle: CLEAR  (threshold: {thresh:.0f}mm)"
@@ -287,20 +326,16 @@ class CursesDisplay:
             self._safe_addstr(row, 0, line[:w - 1], attr)
             row += 1
 
-        # Persistent memory stats
+        # Persistent memory summary
         if row < h - 1 and obs_snap is not None:
-            mem_total = obs_snap.get('memory_total_cells', 0)
-            mem_occ   = obs_snap.get('memory_occupied_cells', 0)
-            mem_conf  = obs_snap.get('memory_max_confidence', 0.0)
-            if mem_total > 0:
-                line = (f"  MEMORY: {mem_occ}/{mem_total} voxels occupied  "
-                        f"peak={mem_conf:.2f}")
-                attr = curses.color_pair(_C_WARN) if mem_occ > 0 else curses.color_pair(_C_DIM)
-            else:
-                line = "  MEMORY: empty"
-                attr = curses.color_pair(_C_DIM)
-            self._safe_addstr(row, 0, line[:w - 1], attr)
-            row += 1
+            mem = obs_snap.get('memory') or {}
+            if mem:
+                line = (f"  OBS MEM: cells={mem.get('num_cells', 0)} "
+                        f"occ={mem.get('num_occupied_cells', 0)} "
+                        f"max_conf={mem.get('max_confidence', 0.0):.2f}")
+                self._safe_addstr(row, 0, line[:w - 1], curses.color_pair(_C_DIM))
+                row += 1
+
 
         return row + 1
 
@@ -352,10 +387,6 @@ class CursesDisplay:
             "  P/] : grip close   +/-: slew rate",
             "  H: go to equil     Shift+H: set equil   ESC: quit",
             "  M: states menu     X: sequence editor",
-            "  0: toggle main plot   1-6: toggle joint plot windows",
-            "  7: reset plot   8: screenshot plot   9: toggle plot log",
-            "  V: ToF viewer   B: export CSV   N: ToF screenshot   G: ToF log",
-            "  F/Shift+F: ToF threshold ±50mm",
             "  Z: start/stop sweep   C: IMU calibrate",
         ]
         for line in lines:

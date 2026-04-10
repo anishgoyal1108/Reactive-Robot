@@ -52,6 +52,8 @@ class IMUState:
         self.calibrated: bool = False
 
         self.last_rx: float = 0.0   # epoch time of last IMU packet
+        self._rot_cache: np.ndarray | None = None
+        self._rot_cache_key: tuple | None = None
 
         # ── Rotation matrix cache ─────────────────────────────────────────────
         # Recomputed only when roll/pitch/yaw actually changes.
@@ -73,6 +75,8 @@ class IMUState:
             self.ax = ax;  self.ay = ay;  self.az = az
             self.mx = mx;  self.my = my;  self.mz = mz
             self.last_rx = time.time()
+            self._rot_cache = None
+            self._rot_cache_key = None
 
     def record_calibration(self) -> None:
         """
@@ -84,6 +88,8 @@ class IMUState:
         with self._lock:
             self.yaw_calibration_offset = self.yaw_deg
             self.calibrated = True
+            self._rot_cache = None
+            self._rot_cache_key = None
 
     def yaw_relative(self) -> float:
         """
@@ -132,7 +138,6 @@ class IMUState:
             [sy*cp,  sy*sp*sr + cy*cr,  sy*sp*cr - cy*sr],
             [  -sp,            cp*sr,             cp*cr  ],
         ], dtype=np.float64)
-
         with self._lock:
             self._cached_R     = result
             self._cached_roll  = roll_deg

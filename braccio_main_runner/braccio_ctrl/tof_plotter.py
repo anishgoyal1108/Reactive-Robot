@@ -216,8 +216,9 @@ class ToFPlotter:
             w.writerow(['channel', 'row', 'col', 'distance_mm'])
             for ch in range(snap['num_channels']):
                 grid = snap['grids'][ch]
-                for r in range(8):
-                    for c in range(8):
+                rows, cols = grid.shape
+                for r in range(rows):
+                    for c in range(cols):
                         w.writerow([ch, r, c, f'{grid[r, c]:.1f}'])
         return path
 
@@ -235,8 +236,10 @@ class ToFPlotter:
 
     def _select_backend(self):
         matplotlib = importlib.import_module('matplotlib')
-        for name, mod in [('tkagg', 'matplotlib.backends.backend_tkagg'),
-                          ('qtagg', 'matplotlib.backends.backend_qtagg')]:
+        # Qt backends are safe to create from a non-main thread (unlike TkAgg,
+        # whose C layer enforces Tcl thread affinity and crashes on Python 3.14).
+        for name, mod in [('qtagg', 'matplotlib.backends.backend_qtagg'),
+                          ('tkagg', 'matplotlib.backends.backend_tkagg')]:
             try:
                 importlib.import_module(mod)
                 matplotlib.use(name, force=True)
@@ -249,6 +252,10 @@ class ToFPlotter:
 
     def _ui_loop(self):
         self._ui_thread_id = threading.get_ident()
+        # Python 3.14 / matplotlib 3.10: the GUI thread check compares against
+        # threading.main_thread().  Redirect that to this thread so the check
+        # passes when matplotlib creates the figure and calls plt.show().
+        threading.main_thread = threading.current_thread
         self._init_ui()
         while not self._stop_event.is_set():
             self._drain_ui_commands()

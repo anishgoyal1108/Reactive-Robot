@@ -34,6 +34,7 @@ from .tof_sensor       import ToFState, ToFBridge, ObstacleResponse
 from .imu_state        import IMUState
 from .obstacle_map     import ObstacleMap
 from .auto_sweep       import AutoSweeper
+from .data_publisher   import DataPublisher
 from .protocol         import (
     cmd_set_all, cmd_set_joint, cmd_set_delta, cmd_home, cmd_get_pos,
 )
@@ -43,7 +44,7 @@ from .constants import (
     DELTA_MIN, DELTA_MAX,
     JOINT_WRIST_ROT, JOINT_GRIPPER,
     R_MIN, R_MAX, Z_MIN, Z_MAX,
-    BAUD_RATE, TOF_NUM_CHANNELS, TOF_BAUD_RATE, TOF_THRESHOLDS_MM,
+    BAUD_RATE, TOF_NUM_CHANNELS, TOF_BAUD_RATE, TOF_THRESHOLD_MM, TOF_THRESHOLDS_MM,
     SENSOR_IGNORE_CHANNELS,
 )
 
@@ -65,8 +66,7 @@ class BraccioController:
         self._bridge    = SerialBridge(port, baud)
         self._state     = ArmState()
         self._state_lib = StateLibrary()
-        self._plotter   = None   # set via attach_plotter() before run()
-        self._tof_plotter = None # set via attach_tof_plotter() before run()
+        self._publisher = DataPublisher()
         self._stdscr    = None   # set inside _curses_main
 
         # ── ToF / IR subsystem ────────────────────────────────────────────
@@ -84,19 +84,6 @@ class BraccioController:
             tof_state=self._tof_state,
             obstacle_map=self._obstacle_map,
         )
-
-    def attach_plotter(self, plotter) -> None:
-        """Attach an ArmPlotter instance before calling run()."""
-        self._plotter = plotter
-
-    def attach_tof_plotter(self, tof_plotter) -> None:
-        """Attach a ToFPlotter instance before calling run()."""
-        self._tof_plotter = tof_plotter
-
-    @property
-    def tof_state(self) -> ToFState:
-        """Expose ToF state for external plotter attachment."""
-        return self._tof_state
 
     # ── Entry point ───────────────────────────────────────────────────────
 
@@ -118,16 +105,12 @@ class BraccioController:
         if self._teensy_port:
             ok = self._tof_bridge.connect(self._teensy_port, self._teensy_baud)
             if not ok:
+                detail = self._tof_bridge._last_open_error or (
+                    f"cannot open {self._teensy_port} "
+                    f"(try: python tof_serial_diagnose.py {self._teensy_port})"
+                )
                 with self._state._lock:
-                    self._state.last_error = (
-                        f"ToF Teensy: cannot open {self._teensy_port}"
-                    )
-
-        # Start plot sampler thread; GUI is pumped on this main thread
-        if self._plotter is not None:
-            self._plotter.start()
-        if self._tof_plotter is not None:
-            self._tof_plotter.start()
+                    self._state.last_error = f"ToF Teensy: {detail}"
 
         # Main loop (~5 Hz, paced by keyboard halfdelay)
         while True:
@@ -150,23 +133,22 @@ class BraccioController:
             obs_snap   = self._obstacle_map.snapshot()
             with self._state._lock:
                 self._state.tof_snapshot = tof_snap
-            display.render(self._state.snapshot(),
+
+            arm_snap = self._state.snapshot()
+            display.render(arm_snap,
                            imu_snap=imu_snap,
                            sweep_snap=sweep_snap,
                            obs_snap=obs_snap)
-            if self._plotter is not None:
-                self._plotter.pump()
-            if self._tof_plotter is not None:
-                self._tof_plotter.pump()
+
+            # Stream data to standalone plotter apps (fire-and-forget UDP)
+            self._publisher.send_arm(arm_snap)
+            self._publisher.send_tof(tof_snap)
 
         if self._sweeper.is_running():
             self._sweeper.stop()
         self._bridge.close()
         self._tof_bridge.close()
-        if self._plotter is not None:
-            self._plotter.stop()
-        if self._tof_plotter is not None:
-            self._tof_plotter.stop()
+        self._publisher.close()
 
     # ── Connection ────────────────────────────────────────────────────────
 
@@ -245,7 +227,6 @@ class BraccioController:
                     f"ToF failed to detect, IR is second line of defense"
                 )
             elif response == ObstacleResponse.REPLAN:
-                # Determine which channel fired and its threshold for display
                 ch_idx = -1
                 try:
                     ch_idx = int(source.replace('tof_ch', ''))
@@ -273,7 +254,8 @@ class BraccioController:
         imu_snap = self._imu_state.snapshot()
         imu_R    = self._imu_state.rotation_matrix()
         self._obstacle_map.update(
-            tof_snap['grids'], arm_snap, imu_snap, imu_R
+            tof_snap['grids'], arm_snap, imu_snap, imu_R,
+            tof_thresholds_mm=tof_snap.get('tof_thresholds_mm'),
         )
 
     # ── IMU calibration ────────────────────────────────────────────────────
@@ -420,12 +402,6 @@ class BraccioController:
         # ── IMU calibration ───────────────────────────────────────────────
         if action == 'imu_calibrate':
             self._run_imu_calibration()
-            return
-        if action in ('tof_ch1_toggle', 'tof_ch2_toggle',
-                       'tof_ch3_toggle', 'tof_ch4_toggle'):
-            if self._tof_plotter is not None:
-                ch = int(action[6]) - 1  # 'tof_ch1_toggle' → 0
-                self._tof_plotter.toggle_channel(ch)
             return
 
         state = self._state

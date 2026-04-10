@@ -40,11 +40,10 @@ from typing import Optional
 
 from .arm_state    import ArmState
 from .serial_bridge import SerialBridge
-from .ik_solver    import solve_ik, polar_to_cartesian
+from .ik_solver    import solve_ik, polar_to_cartesian, reachability
 from .obstacle_map import ObstacleMap
 from .tof_sensor   import ToFState, ObstacleResponse
 from .protocol     import cmd_set_all, cmd_set_delta
-import numpy as np
 
 from .constants    import (
     SWEEP_THETA_MIN, SWEEP_THETA_MAX,
@@ -53,11 +52,10 @@ from .constants    import (
     SWEEP_DELTA_NORMAL, SWEEP_DELTA_REPLAN,
     SWEEP_BACK_STEPS, SWEEP_OBSTACLE_MARGIN_DEG,
     SWEEP_Z_CANDIDATES,
-    COLLISION_CHECK_RADIUS_MM,
+    SWEEP_COLLISION_RADIUS_MM,
     DELTA_MIN, DELTA_MAX,
     R_MIN, R_MAX, Z_MIN, Z_MAX,
 )
-from .ik_solver    import reachability
 
 
 class SweepState(enum.Enum):
@@ -253,18 +251,19 @@ class AutoSweeper:
             return
 
         # ── Step 2: Z-axis avoidance (go over or under the obstacle) ─────────
-        # Tried every tick so the arm reacts as soon as a Z level clears.
+        # Retried every tick so the arm reacts as soon as a Z level clears.
         new_z = self._find_clear_z(cur_theta)
         if new_z is not None:
             with self._state_lock:
-                self.sweep_z        = new_z
-                self._sweep_state   = SweepState.RUNNING
+                self.sweep_z       = new_z
+                self._bypass_theta = None
+                self._sweep_state  = SweepState.RUNNING
             self._send_move(cur_theta, z=new_z)
             self._send_delta(self.delta_normal)
             return
 
         # ── Step 3: hold position — obstacle spans all options ────────────────
-        # Will keep retrying step 1 + step 2 on every tick until clear.
+        # Will keep retrying steps 1 + 2 on every tick until clear.
 
     # ── Back away (IR DANGER / CLOSE) ────────────────────────────────────────
 
@@ -323,72 +322,17 @@ class AutoSweeper:
 
         return round(candidate, 1)
 
-    # ── Collision check helpers ───────────────────────────────────────────────
-
-    def _is_position_clear(self, theta: float, r: float, z: float) -> bool:
-        """
-        Check if the end-effector at (theta, r, z) would collide with any
-        known obstacle.
-
-        Uses a two-tier check:
-          1. O(k) persistent voxel memory (fast-path, k ~ 27 cells)
-          2. O(N) rolling point cloud (fallback for very recent detections)
-
-        Returns True if safe to move there.
-        """
-        x_ee, y_ee = polar_to_cartesian(theta, r)
-
-        # Fast-path: check persistent memory (O(k), k ≈ 27)
-        if self._obstacle_map.is_memory_occupied(
-                x_ee, y_ee, z, COLLISION_CHECK_RADIUS_MM):
-            return False
-
-        # Fallback: check rolling point cloud (O(N))
-        ee = np.array([x_ee, y_ee, z], dtype=np.float64)
-        pts = self._obstacle_map.all_points()
-        if len(pts) == 0:
-            return True
-        dists = np.linalg.norm(pts - ee, axis=1)
-        return bool(dists.min() >= COLLISION_CHECK_RADIUS_MM)
-
-    def _find_clear_z(self, theta: float) -> Optional[float]:
-        """
-        Search SWEEP_Z_CANDIDATES for the first Z at which (theta, sweep_r, z)
-        is both kinematically reachable and obstacle-free.
-
-        Tries Z values above current sweep_z first (go over the obstacle),
-        then below (go under). Uses reachability() from ik_solver for the fast
-        geometric check before the more expensive obstacle cloud query.
-
-        Returns the first valid Z, or None if all candidates are blocked.
-        """
-        above = sorted([z for z in SWEEP_Z_CANDIDATES if z > self.sweep_z])
-        below = sorted([z for z in SWEEP_Z_CANDIDATES if z < self.sweep_z], reverse=True)
-        for z in above + below:
-            if reachability(theta, self.sweep_r, z) != 'ok':
-                continue
-            if self._is_position_clear(theta, self.sweep_r, z):
-                return z
-        return None
-
     # ── Command helpers ───────────────────────────────────────────────────────
 
     def _send_move(self, theta: float, z: float = None) -> bool:
         """
-        Compute IK for (theta, sweep_r, z) and send SET ALL if the target
-        position passes the pre-command collision check.
-
-        Parameters
-        ----------
-        theta : target base angle (degrees)
-        z     : target height (mm); defaults to self.sweep_z if omitted
-
-        Returns True if the command was sent, False if blocked.
+        Compute IK for (theta, sweep_r, z) and send SET ALL.
+        Returns True if command was sent, False if blocked by collision check.
+        z defaults to self.sweep_z if omitted.
         """
         z = z if z is not None else self.sweep_z
 
-        # Pre-command collision check: abort if end-effector would hit an obstacle
-        if not self._is_position_clear(theta, self.sweep_r, z):
+        if not self._is_position_clear(theta, z):
             return False
 
         x, y   = polar_to_cartesian(theta, self.sweep_r)
@@ -403,7 +347,6 @@ class AutoSweeper:
             self._arm_state.theta = theta
             self._arm_state.r     = self.sweep_r
             self._arm_state.z     = z
-
         self._arm_state.update_joints_from_ik(result, wrist_offset,
                                                wrist_rot, gripper)
         positions = self._arm_state.snapshot()['joints']

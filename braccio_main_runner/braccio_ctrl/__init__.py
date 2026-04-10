@@ -5,8 +5,14 @@ Usage
 -----
   python -m braccio_ctrl [port]                            # default port: /dev/ttyACM0
   python -m braccio_ctrl --list-ports                      # list available serial ports
-  python run_braccio.py [port]                             # standalone launcher
   python -m braccio_ctrl [port] --teensy-port /dev/ttyACM1 # with ToF/IR sensing
+
+Live matplotlib plotters are separate processes (no threading):
+  python arm_plotter_app.py          # joint-angle time series
+  python tof_plotter_app.py          # ToF heatmaps + 3-D surfaces
+
+ToF serial troubleshooting (close other programs using the port):
+  python tof_serial_diagnose.py /dev/ttyACM0 --seconds 5
 
 Modules
 -------
@@ -19,7 +25,7 @@ Modules
   display         — curses terminal UI
   controller      — main control loop, integrates all modules
   tof_sensor      — Teensy serial bridge for VL53L5CX ToF + IR (OUT1D)
-  tof_plotter     — real-time 4-channel ToF heatmap + 3D surface viewer
+  data_publisher  — fire-and-forget UDP publisher for plotter apps
 """
 
 from .controller import BraccioController

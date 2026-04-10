@@ -30,6 +30,7 @@ from collections import deque
 import numpy as np
 
 from .imu_state import IMUState
+from .serial_bridge import ensure_serial_device_path
 from .constants import (
     TOF_THRESHOLDS_MM,
     SENSOR_REPLAN_CHANNELS,
@@ -102,8 +103,8 @@ class ToFState:
         # Obstacle detection
         self.obstacle_response: str  = ObstacleResponse.CLEAR
         self.obstacle_source:   str  = ''      # 'tof_chN' or 'ir'
-        self.obstacle_dist_mm:  float = -1.0   # closest measured distance (primary ch)
-        # Per-channel thresholds (mm); index = channel number
+        self.obstacle_dist_mm:  float = -1.0   # closest measured distance
+        self.tof_threshold_mm:  float = TOF_THRESHOLDS_MM[0]  # legacy fallback
         self.tof_thresholds_mm: list = list(TOF_THRESHOLDS_MM)
 
         # Mode
@@ -121,6 +122,13 @@ class ToFState:
         self.history_avg: deque = deque(maxlen=self._history_len)
         self.history_max: deque = deque(maxlen=self._history_len)
 
+        # Per-channel parse diagnostics (last good frame; helps tell “no serial”
+        # from “serial OK but every cell masked invalid by firmware rules”)
+        self.diag_raw_min_mm:   list = [float('nan')] * num_channels
+        self.diag_raw_max_mm:   list = [float('nan')] * num_channels
+        self.diag_valid_cells:  list = [0] * num_channels
+        self.diag_zone_count:   list = [0] * num_channels
+
     def snapshot(self) -> dict:
         """Return a copy of all display-relevant ToF/IR state."""
         with self._lock:
@@ -137,11 +145,16 @@ class ToFState:
                 'obstacle_response':  self.obstacle_response,
                 'obstacle_source':    self.obstacle_source,
                 'obstacle_dist_mm':   self.obstacle_dist_mm,
+                'tof_threshold_mm':   self.tof_threshold_mm,
                 'tof_thresholds_mm':  list(self.tof_thresholds_mm),
                 'mode':         self.mode,
                 'connected':    self.connected,
                 'port':         self.port,
                 'num_channels': self.num_channels,
+                'diag_raw_min_mm':  list(self.diag_raw_min_mm),
+                'diag_raw_max_mm':  list(self.diag_raw_max_mm),
+                'diag_valid_cells': list(self.diag_valid_cells),
+                'diag_zone_count':  list(self.diag_zone_count),
             }
 
     def update_obstacle_status(self):
@@ -169,8 +182,9 @@ class ToFState:
                 return
 
             # --- Primary ToF check (SENSOR_REPLAN_CHANNELS only) ---
-            closest    = float('inf')
-            closest_ch = -1
+            closest     = float('inf')
+            closest_ch  = -1
+            closest_thr = -1.0
             for ch in range(self.num_channels):
                 if ch in SENSOR_IGNORE_CHANNELS:   # CH3 (bottom): skip
                     continue
@@ -179,18 +193,25 @@ class ToFState:
                 g = self.grids[ch]
                 if np.isnan(g).all():
                     continue
-                ch_min    = float(np.nanmin(g))
-                threshold = self.tof_thresholds_mm[ch]
-                if ch_min < threshold and ch in SENSOR_REPLAN_CHANNELS:
-                    if ch_min < closest:
-                        closest    = ch_min
-                        closest_ch = ch
-                # Advisory channels: detected but do not set REPLAN
+                ch_min = float(np.nanmin(g))
+                thr = (self.tof_thresholds_mm[ch]
+                       if ch < len(self.tof_thresholds_mm)
+                       else self.tof_threshold_mm)
+                if ch in SENSOR_ADVISORY_CHANNELS:
+                    # Advisory channels never trigger replans
+                    continue
+                if ch not in SENSOR_REPLAN_CHANNELS:
+                    continue
+                if ch_min < thr and ch_min < closest:
+                    closest     = ch_min
+                    closest_ch  = ch
+                    closest_thr = thr
 
             if closest_ch >= 0:
                 self.obstacle_response = ObstacleResponse.REPLAN
                 self.obstacle_source   = f'tof_ch{closest_ch}'
                 self.obstacle_dist_mm  = closest
+                self.tof_threshold_mm  = closest_thr
                 return
 
             # --- IR advisory (far detection, not critical) ---
@@ -226,12 +247,19 @@ class ToFBridge:
         self._stop       = threading.Event()
         self._write_lock = threading.Lock()
         self._reader     = None
+        self._last_open_error: str = ''
 
     # ── Connection ────────────────────────────────────────────────────────
 
     def connect(self, port: str, baud: int = 115200) -> bool:
         """Open serial port and start reader thread."""
+        self._last_open_error = ''
         if not _SERIAL_OK:
+            return False
+        try:
+            ensure_serial_device_path(port, 'Teensy serial port (--teensy-port)')
+        except ValueError as exc:
+            self._last_open_error = str(exc)
             return False
         try:
             self._ser = serial.Serial(port, baud, timeout=0.05)
@@ -248,9 +276,14 @@ class ToFBridge:
                 name='tof-serial-reader',
             )
             self._reader.start()
+
+            # Enable all 4 channels (firmware defaults to 2)
+            self.send_mode('ACT 4')
+
             return True
         except Exception as e:
             self._state.connected = False
+            self._last_open_error = str(e)
             return False
 
     def close(self):
@@ -298,7 +331,12 @@ class ToFBridge:
                 if not raw:
                     continue
 
-                # ── FRAME line ────────────────────────────────────────────
+                # ── TF frame (vl5_tca_4x4 firmware) ──────────────────────
+                if raw.startswith('TF,'):
+                    self._parse_tf(raw)
+                    continue
+
+                # ── FRAME line (legacy firmware) ──────────────────────────
                 if raw.startswith('FRAME,'):
                     self._parse_frame(raw)
                     continue
@@ -314,6 +352,11 @@ class ToFBridge:
                         s.mode = raw.split(',', 1)[1].strip()
                     continue
 
+                # ── CFG lines (grid size / active count / rate) ───────────
+                if raw.startswith('CFG,'):
+                    self._parse_cfg(raw)
+                    continue
+
                 # ── IMU line ───────────────────────────────────────────────
                 if raw.startswith('IMU,'):
                     self._parse_imu(raw)
@@ -324,8 +367,94 @@ class ToFBridge:
                     break
                 time.sleep(0.01)
 
+    def _parse_tf(self, line: str):
+        """
+        Parse the TF frame format from vl5_tca_4x4 firmware:
+          TF,<seq>,<mcu_ms>,S<ch>,<ch>,<joint_id>,<status>,<rows>,<cols>,<d0..dN>,<v0..vN>
+
+        The sensor_id field is 'S<ch>' (e.g. 'S0'), mux_ch is the integer
+        channel (0-3), rows/cols define the grid (4×4 = 16 zones for this
+        firmware), followed by N distance values then N validity flags.
+        """
+        s = self._state
+        parts = line.split(',')
+        # Minimum: TF, seq, mcu_ms, sensor_id, mux_ch, joint_id, status, rows, cols, d0
+        if len(parts) < 10:
+            return
+        try:
+            # parts[1] = seq, parts[2] = mcu_ms, parts[3] = sensor_id (S0..S3)
+            # parts[4] = mux_ch (int), parts[5] = joint_id (str), parts[6] = status
+            # parts[7] = rows, parts[8] = cols
+            ch    = int(parts[4])
+            rows  = int(parts[7])
+            cols  = int(parts[8])
+            zones = rows * cols
+
+            if ch < 0 or ch >= s.num_channels:
+                return
+            if zones < 1:
+                return
+
+            # Distance values start at parts[9]; validity flags follow after
+            data_start = 9
+            data_end   = data_start + zones
+            if len(parts) < data_end:
+                return
+
+            dist = np.array(parts[data_start:data_end], dtype=np.float32)
+            raw_min = float(np.min(dist))
+            raw_max = float(np.max(dist))
+
+            # Apply validity mask if flags are present
+            if len(parts) >= data_end + zones:
+                valid = np.array(parts[data_end:data_end + zones], dtype=np.int8)
+                dist[valid == 0] = np.nan
+
+            now = time.time()
+            grid = dist.reshape((rows, cols))
+            n_kept = int(np.sum(~np.isnan(grid)))
+
+            with s._lock:
+                s.grids[ch]     = grid
+                s.active[ch]    = 1
+                s.last_rx[ch]   = now
+                s.frame_cnt[ch] += 1
+                s.dirty[ch]     = True
+                s.diag_raw_min_mm[ch]  = raw_min
+                s.diag_raw_max_mm[ch]  = raw_max
+                s.diag_valid_cells[ch] = n_kept
+                s.diag_zone_count[ch]  = zones
+
+                g_valid = grid[~np.isnan(grid)]
+                if g_valid.size > 0:
+                    s.history_t.append(now)
+                    s.history_ch.append(ch)
+                    s.history_min.append(float(np.nanmin(g_valid)))
+                    s.history_avg.append(float(np.mean(g_valid)))
+                    s.history_max.append(float(np.max(g_valid)))
+
+            s.update_obstacle_status()
+
+        except Exception:
+            pass
+
+    def _parse_cfg(self, line: str):
+        """
+        Parse CFG lines sent by the firmware on startup:
+          CFG,ACT,<count>          — number of active channels
+          CFG,GRID,<rows>,<cols>   — sensor grid dimensions
+          CFG,TARGET_HZ,<hz>       — target frame rate (informational)
+        """
+        parts = line.split(',')
+        if len(parts) < 3:
+            return
+        kind = parts[1].strip().upper()
+        if kind == 'ACT':
+            pass   # informational; active count is managed by ACT 4 command
+        # GRID and TARGET_HZ are informational only; no state change needed
+
     def _parse_frame(self, line: str):
-        """Parse: FRAME,ch,activeFlag,hz,res,d0,...,d63"""
+        """Parse legacy: FRAME,ch,activeFlag,hz,res,d0,...,dN"""
         s = self._state
         parts = line.split(',')
         if len(parts) < 6:
@@ -338,34 +467,40 @@ class ToFBridge:
 
             if ch < 0 or ch >= s.num_channels:
                 return
-            if res != 64:
+            if res not in (16, 64):
                 return
 
-            data = np.array(parts[5:5 + 64], dtype=np.float32)
-            if data.size != 64:
+            side = 4 if res == 16 else 8
+            data = np.array(parts[5:5 + res], dtype=np.float32)
+            if data.size != res:
                 return
 
             now = time.time()
-            grid = data.reshape((8, 8))
+            grid = data.reshape((side, side))
+            raw_min = float(np.min(data))
+            raw_max = float(np.max(data))
+            n_kept = int(np.sum(~np.isnan(grid)))
 
             with s._lock:
-                s.grids[ch]    = grid
-                s.active[ch]   = 1 if active else 0
-                s.hz[ch]       = hz
-                s.last_rx[ch]  = now
+                s.grids[ch]     = grid
+                s.active[ch]    = 1 if active else 0
+                s.hz[ch]        = hz
+                s.last_rx[ch]   = now
                 s.frame_cnt[ch] += 1
-                s.dirty[ch]    = True
+                s.dirty[ch]     = True
+                s.diag_raw_min_mm[ch]  = raw_min
+                s.diag_raw_max_mm[ch]  = raw_max
+                s.diag_valid_cells[ch] = n_kept
+                s.diag_zone_count[ch]  = res
 
-                # Append to history
                 g_valid = grid[~np.isnan(grid)]
                 if g_valid.size > 0:
                     s.history_t.append(now)
                     s.history_ch.append(ch)
-                    s.history_min.append(float(np.min(g_valid)))
+                    s.history_min.append(float(np.nanmin(g_valid)))
                     s.history_avg.append(float(np.mean(g_valid)))
                     s.history_max.append(float(np.max(g_valid)))
 
-            # Update obstacle status after every frame
             s.update_obstacle_status()
 
         except Exception:
@@ -391,24 +526,34 @@ class ToFBridge:
 
     def _parse_imu(self, line: str):
         """
-        Parse: IMU,roll,pitch,yaw,ax,ay,az,mx,my,mz
+        Parse IMU lines from the vl5_tca_4x4 firmware:
+          IMU,<seq>,<mcu_ms>,<ax_g>,<ay_g>,<az_g>,<gx_dps>,<gy_dps>,<gz_dps>,<temp_c>,<status>
 
-        All angle values in degrees; acceleration in m/s²;
-        magnetometer in device units (uT).
+        Derives roll and pitch from the accelerometer; yaw is not available
+        from an accelerometer-only MPU-6050 without magnetometer fusion.
         """
         parts = line.split(',')
         if len(parts) < 10:
             return
         try:
-            roll  = float(parts[1])
-            pitch = float(parts[2])
-            yaw   = float(parts[3])
-            ax    = float(parts[4])
-            ay    = float(parts[5])
-            az    = float(parts[6])
-            mx    = float(parts[7])
-            my    = float(parts[8])
-            mz    = float(parts[9])
-            self._imu_state.update(roll, pitch, yaw, ax, ay, az, mx, my, mz)
+            # parts[1]=seq, parts[2]=mcu_ms
+            ax_g   = float(parts[3])
+            ay_g   = float(parts[4])
+            az_g   = float(parts[5])
+            gx_dps = float(parts[6])
+            gy_dps = float(parts[7])
+            gz_dps = float(parts[8])
+            # parts[9]=temp_c, parts[10]=status
+
+            # Derive roll/pitch from gravity vector (radians → degrees)
+            import math
+            roll  = math.degrees(math.atan2(ay_g, az_g))
+            pitch = math.degrees(math.atan2(-ax_g,
+                                            math.sqrt(ay_g * ay_g + az_g * az_g)))
+            yaw   = 0.0   # not available without magnetometer fusion
+
+            self._imu_state.update(roll, pitch, yaw,
+                                   ax_g, ay_g, az_g,
+                                   0.0, 0.0, 0.0)
         except Exception:
             pass

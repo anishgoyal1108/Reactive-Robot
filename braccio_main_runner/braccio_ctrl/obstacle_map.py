@@ -47,6 +47,7 @@ from .constants import (
     L1, L2, L3,
 )
 from .ik_solver import polar_to_cartesian
+from .obstacle_memory import PersistentObstacleMemory
 
 
 # ── Sensor mount geometry ─────────────────────────────────────────────────────
@@ -163,6 +164,9 @@ class ObstacleMap:
         self._last_obs_t  = 0.0          # time of most recent valid observation
         self._tracker_last_update = 0.0  # epoch time of last Kalman update
 
+        # Persistent voxel memory for O(1) occupancy lookups
+        self._memory = PersistentObstacleMemory()
+
     # ── Main update call (from controller main loop) ──────────────────────────
 
     def update(self, tof_grids: list, arm_snap: dict,
@@ -221,6 +225,12 @@ class ObstacleMap:
                     timestamp=now,
                     source_ch=ch,
                 ))
+
+        # Feed persistent memory with all new world-frame points
+        all_new_pts = [c.points for c in new_clouds if len(c.points) > 0]
+        if all_new_pts:
+            self._memory.mark_occupied(np.vstack(all_new_pts))
+        self._memory.decay()   # time-based confidence reduction + prune
 
         with self._lock:
             # Discard stale observations
@@ -333,6 +343,7 @@ class ObstacleMap:
                    if self._tracker.initialized else None)
             unc = (self._tracker.position_uncertainty_mm
                    if self._tracker.initialized else -1.0)
+            mem = self._memory.stats()
             return {
                 'num_points':        len(pts),
                 'centroid':          centroid,
@@ -340,7 +351,29 @@ class ObstacleMap:
                 'kalman_uncertainty_mm': unc,
                 'has_active':        self.has_active_obstacle(),
                 'last_obs_age_s':    time.time() - self._last_obs_t,
+                'memory_total_cells':    mem['total_cells'],
+                'memory_occupied_cells': mem['occupied_cells'],
+                'memory_max_confidence': mem['max_confidence'],
             }
+
+    # ── Persistent memory interface ──────────────────────────────────────────
+
+    def is_memory_occupied(self, x: float, y: float, z: float,
+                           radius: float) -> bool:
+        """O(k) occupancy check against the persistent voxel memory."""
+        return self._memory.is_region_occupied(x, y, z, radius)
+
+    def memory_occupied_thetas(self, r_mm: float, z_mm: float) -> List[float]:
+        """Return obstacle thetas from persistent memory at given (r, z) slice."""
+        return self._memory.occupied_thetas(r_mm, z_mm)
+
+    def memory_stats(self) -> dict:
+        """Return persistent memory stats for display."""
+        return self._memory.stats()
+
+    def clear_memory(self) -> None:
+        """Clear persistent memory (e.g. after IMU recalibration)."""
+        self._memory.clear()
 
     # ── Internal projection ───────────────────────────────────────────────────
 

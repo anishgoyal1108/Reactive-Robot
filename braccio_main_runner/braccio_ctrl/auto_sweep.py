@@ -210,14 +210,13 @@ class AutoSweeper:
     # ── Replan (obstacle in primary FOV) ─────────────────────────────────────
 
     def _do_replan(self) -> None:
+        # Always attempt bypass on every tick — no 10-second early-return.
+        # The old code blocked here for _obstacle_wait_timeout_s (10 s),
+        # which prevented Z-axis and theta bypass from being retried.
         with self._state_lock:
-            if self._sweep_state == SweepState.PAUSED_OBSTACLE:
-                waited = time.time() - self._obstacle_wait_start
-                if waited < self._obstacle_wait_timeout_s:
-                    return   # still waiting for a path to open
-                # Timeout: force a bypass attempt anyway
+            if self._sweep_state != SweepState.PAUSED_OBSTACLE:
+                self._obstacle_wait_start = time.time()
             self._sweep_state = SweepState.PAUSED_OBSTACLE
-            self._obstacle_wait_start = time.time()
 
         # Slow down for smooth deceleration / replanning
         self._send_delta(self.delta_replan)
@@ -226,9 +225,15 @@ class AutoSweeper:
             cur_theta = self._current_theta
 
         # ── Step 1: theta bypass (horizontal avoidance) ───────────────────────
+        # Merge rolling cloud + persistent memory for a complete obstacle picture
         forbidden = self._obstacle_map.get_obstacle_thetas(
             self.sweep_r, self.sweep_z
         )
+        mem_thetas = self._obstacle_map.memory_occupied_thetas(
+            self.sweep_r, self.sweep_z
+        )
+        forbidden.extend(mem_thetas)
+
         # Include Kalman estimate of obstacle that left the sensor FOV
         est = self._obstacle_map.estimate_lost_obstacle()
         if est is not None:
@@ -248,6 +253,7 @@ class AutoSweeper:
             return
 
         # ── Step 2: Z-axis avoidance (go over or under the obstacle) ─────────
+        # Tried every tick so the arm reacts as soon as a Z level clears.
         new_z = self._find_clear_z(cur_theta)
         if new_z is not None:
             with self._state_lock:
@@ -257,8 +263,8 @@ class AutoSweeper:
             self._send_delta(self.delta_normal)
             return
 
-        # ── Step 3: hold position — wait for obstacle to clear ────────────────
-        # Will retry on next tick until _obstacle_wait_timeout_s expires
+        # ── Step 3: hold position — obstacle spans all options ────────────────
+        # Will keep retrying step 1 + step 2 on every tick until clear.
 
     # ── Back away (IR DANGER / CLOSE) ────────────────────────────────────────
 
@@ -322,12 +328,22 @@ class AutoSweeper:
     def _is_position_clear(self, theta: float, r: float, z: float) -> bool:
         """
         Check if the end-effector at (theta, r, z) would collide with any
-        known obstacle point in the world-frame cloud.
+        known obstacle.
 
-        Returns True if the nearest obstacle point is at least
-        COLLISION_CHECK_RADIUS_MM away (i.e. safe to move there).
+        Uses a two-tier check:
+          1. O(k) persistent voxel memory (fast-path, k ~ 27 cells)
+          2. O(N) rolling point cloud (fallback for very recent detections)
+
+        Returns True if safe to move there.
         """
         x_ee, y_ee = polar_to_cartesian(theta, r)
+
+        # Fast-path: check persistent memory (O(k), k ≈ 27)
+        if self._obstacle_map.is_memory_occupied(
+                x_ee, y_ee, z, COLLISION_CHECK_RADIUS_MM):
+            return False
+
+        # Fallback: check rolling point cloud (O(N))
         ee = np.array([x_ee, y_ee, z], dtype=np.float64)
         pts = self._obstacle_map.all_points()
         if len(pts) == 0:

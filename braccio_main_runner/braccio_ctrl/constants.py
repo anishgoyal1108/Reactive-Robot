@@ -149,6 +149,15 @@ SENSOR_IGNORE_CHANNELS   = [3]
 # A planned move is blocked if any obstacle cloud point is closer than this.
 COLLISION_CHECK_RADIUS_MM = 80.0
 
+# ── Persistent obstacle memory (voxel grid) ─────────────────────────────
+OBS_MEMORY_CELL_MM          = 40.0    # voxel side length (mm) — spatial resolution
+OBS_MEMORY_CONFIRM_RATE     = 0.3     # confidence added per observation (0→1 scale)
+OBS_MEMORY_DECAY_RATE       = 0.15    # confidence lost per second without observation
+OBS_MEMORY_CONFIDENCE_MIN   = 0.0     # floor
+OBS_MEMORY_CONFIDENCE_MAX   = 1.0     # ceiling
+OBS_MEMORY_PRUNE_BELOW      = 0.05    # remove cells below this confidence
+OBS_MEMORY_OCCUPIED_THRESH  = 0.2     # cell considered "occupied" above this confidence
+
 # ── Key bindings: curses key code → action string ─────────────────────────
 # fmt: off
 KEY_BINDINGS = {

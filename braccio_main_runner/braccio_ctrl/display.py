@@ -287,6 +287,21 @@ class CursesDisplay:
             self._safe_addstr(row, 0, line[:w - 1], attr)
             row += 1
 
+        # Persistent memory stats
+        if row < h - 1 and obs_snap is not None:
+            mem_total = obs_snap.get('memory_total_cells', 0)
+            mem_occ   = obs_snap.get('memory_occupied_cells', 0)
+            mem_conf  = obs_snap.get('memory_max_confidence', 0.0)
+            if mem_total > 0:
+                line = (f"  MEMORY: {mem_occ}/{mem_total} voxels occupied  "
+                        f"peak={mem_conf:.2f}")
+                attr = curses.color_pair(_C_WARN) if mem_occ > 0 else curses.color_pair(_C_DIM)
+            else:
+                line = "  MEMORY: empty"
+                attr = curses.color_pair(_C_DIM)
+            self._safe_addstr(row, 0, line[:w - 1], attr)
+            row += 1
+
         return row + 1
 
     def _draw_imu_status(self, row: int, w: int, h: int,

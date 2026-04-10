@@ -71,7 +71,6 @@ class BraccioController:
 
         # ── ToF / IR subsystem ────────────────────────────────────────────
         self._tof_state  = ToFState(num_channels=TOF_NUM_CHANNELS)
-        self._tof_state.tof_threshold_mm = TOF_THRESHOLD_MM
         self._imu_state  = IMUState()
         self._tof_bridge = ToFBridge(self._tof_state, self._imu_state)
         self._teensy_port = teensy_port
@@ -288,10 +287,13 @@ class BraccioController:
         arm at a known orientation (e.g. theta=90, arm pointing forward).
         """
         self._imu_state.record_calibration()
+        # World frame changed — clear persistent obstacle memory
+        self._obstacle_map.clear_memory()
         with self._state._lock:
             self._state.last_resp = (
                 f"IMU calibrated: yaw_ref="
                 f"{self._imu_state.yaw_calibration_offset:.1f}°"
+                f" (obstacle memory cleared)"
             )
             self._state.last_error = ""
 

@@ -285,31 +285,37 @@
        TOF SENSOR MOUNTS  (4× fixed massless children of wrist_roll)
        Each link sits on one face of the wrist block. Its +X axis
        IS the ray direction the sim raycasts along.
+
+       Channel mapping (MUX index → physical direction):
+         CH0 → tof_up_link     (top,    rays point +Z)
+         CH1 → tof_right_link  (right,  rays point -Y)
+         CH2 → tof_left_link   (left,   rays point +Y)
+         CH3 → tof_down_link   (bottom, rays point -Z)
        ======================================================== -->
-  <joint name="mount_tof_front" type="fixed">
-    <parent link="wrist_roll_link"/>
-    <child link="tof_front_link"/>
-    <origin xyz="0.025 0 0" rpy="0 0 0"/>
-  </joint>
-  <link name="tof_front_link">
-    <inertial><mass value="0.001"/><inertia ixx="1e-8" ixy="0" ixz="0" iyy="1e-8" iyz="0" izz="1e-8"/></inertial>
-  </link>
-
-  <joint name="mount_tof_back" type="fixed">
-    <parent link="wrist_roll_link"/>
-    <child link="tof_back_link"/>
-    <origin xyz="-0.005 0 0" rpy="0 0 3.14159"/>
-  </joint>
-  <link name="tof_back_link">
-    <inertial><mass value="0.001"/><inertia ixx="1e-8" ixy="0" ixz="0" iyy="1e-8" iyz="0" izz="1e-8"/></inertial>
-  </link>
-
   <joint name="mount_tof_up" type="fixed">
     <parent link="wrist_roll_link"/>
     <child link="tof_up_link"/>
     <origin xyz="0.010 0 0.020" rpy="0 -1.5708 0"/>
   </joint>
   <link name="tof_up_link">
+    <inertial><mass value="0.001"/><inertia ixx="1e-8" ixy="0" ixz="0" iyy="1e-8" iyz="0" izz="1e-8"/></inertial>
+  </link>
+
+  <joint name="mount_tof_right" type="fixed">
+    <parent link="wrist_roll_link"/>
+    <child link="tof_right_link"/>
+    <origin xyz="0.010 -0.025 0" rpy="0 0 -1.5708"/>
+  </joint>
+  <link name="tof_right_link">
+    <inertial><mass value="0.001"/><inertia ixx="1e-8" ixy="0" ixz="0" iyy="1e-8" iyz="0" izz="1e-8"/></inertial>
+  </link>
+
+  <joint name="mount_tof_left" type="fixed">
+    <parent link="wrist_roll_link"/>
+    <child link="tof_left_link"/>
+    <origin xyz="0.010 0.025 0" rpy="0 0 1.5708"/>
+  </joint>
+  <link name="tof_left_link">
     <inertial><mass value="0.001"/><inertia ixx="1e-8" ixy="0" ixz="0" iyy="1e-8" iyz="0" izz="1e-8"/></inertial>
   </link>
 

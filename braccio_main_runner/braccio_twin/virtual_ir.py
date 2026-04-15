@@ -2,9 +2,11 @@
 virtual_ir.py — PyBullet raycast backend for the 4 base-pocket IR sensors.
 
 Each IR sensor is a boolean "something is close" detector. In the real
-hardware they are active-LOW binary outputs debounced by firmware; the
-count of firing sensors is encoded as a 2-bit severity (0..3) that gets
-fed into ToFState.ingest_ir_raw().
+hardware they are 5 V active-LOW sensors whose outputs pass through a
+TI SN74LVC02A NOR inverter (running at 3.3 V) before reaching the Teensy,
+so the firmware sees an active-HIGH signal. Either way, only the count
+of firing sensors matters — it's encoded as a 2-bit severity (0..3)
+that gets fed into ToFState.ingest_ir_raw().
 
     0 = CLEAR   (no sensors firing)
     1 = FAR     (1 sensor firing)

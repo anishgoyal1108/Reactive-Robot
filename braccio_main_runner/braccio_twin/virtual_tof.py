@@ -8,11 +8,11 @@ a constant value across the whole 8×8 cell pattern so the existing
 downstream code (min/mean/max calculations, thresholding) behaves the
 same as it does with real sensor data.
 
-Sensor → channel mapping (wired to match CLAUDE.md's authority rules):
-    CH0 → tof_front_link   (primary, sweep direction)
-    CH1 → tof_back_link    (primary, opposite sweep)
-    CH2 → tof_up_link      (advisory)
-    CH3 → tof_down_link    (ignored / floor false-positives)
+Sensor → channel mapping (matches ``safety/api.py:_MOUNT_BY_CHANNEL``):
+    CH0 → tof_up_link     (TOP,    rays along +Z from wrist)
+    CH1 → tof_right_link  (RIGHT,  rays along -Y from wrist)
+    CH2 → tof_left_link   (LEFT,   rays along +Y from wrist)
+    CH3 → tof_down_link   (BOTTOM, rays along -Z from wrist)
 """
 
 from __future__ import annotations
@@ -28,9 +28,9 @@ from .sim_arm import SimArm
 
 # (channel index, URDF link name)
 TOF_CHANNELS: list[tuple[int, str]] = [
-    (0, "tof_front_link"),
-    (1, "tof_back_link"),
-    (2, "tof_up_link"),
+    (0, "tof_up_link"),
+    (1, "tof_right_link"),
+    (2, "tof_left_link"),
     (3, "tof_down_link"),
 ]
 

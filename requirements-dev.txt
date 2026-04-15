@@ -3,3 +3,6 @@ mypy>=1.10
 types-pyserial>=3.5
 numpy>=1.24
 matplotlib>=3.7
+# web/backend test suite — fastapi.testclient.TestClient requires httpx
+httpx>=0.27
+pytest>=8.0

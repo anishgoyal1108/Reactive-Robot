@@ -27,10 +27,18 @@ import { RunControls } from "./editor/RunControls";
 import { ManualJointPanel } from "./editor/ManualJointPanel";
 import { RecorderPanel } from "./recorder/RecorderPanel";
 import { ModeBanner } from "./mode/ModeBanner";
+import { DemoBanner } from "./mode/DemoBanner";
+import { isDemoMode } from "./mode/demoMode";
 import { api, type DeployMode } from "./state/api";
 
 export function App() {
-  useEffect(() => startTelemetry(), []);
+  const demo = isDemoMode();
+  useEffect(() => {
+    // No backend WebSocket in demo mode — suppress the telemetry
+    // reconnect loop so the console stays quiet.
+    if (demo) return;
+    return startTelemetry();
+  }, [demo]);
 
   const connected = useTelemetryStore((s) => s.connected);
   const joints = useTelemetryStore((s) => s.joints);
@@ -108,6 +116,7 @@ export function App() {
 
   return (
     <div className="app-shell" style={shellStyle}>
+      {demo && <DemoBanner />}
       <header className="app-shell__topbar">
         <div className="app-shell__topbar-left">
           <button
@@ -127,11 +136,13 @@ export function App() {
           />
           Braccio Digital Twin
         </div>
-        <ModeBanner mode={mode} onModeChange={setMode} />
+        {!demo && <ModeBanner mode={mode} onModeChange={setMode} />}
         <div>
-          {status?.running
-            ? `running: line ${status.line} (${status.kind})`
-            : "idle"}
+          {demo
+            ? "demo"
+            : status?.running
+              ? `running: line ${status.line} (${status.kind})`
+              : "idle"}
         </div>
       </header>
 

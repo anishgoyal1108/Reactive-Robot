@@ -536,3 +536,36 @@ body,
 .blocklyMainBackground {
   stroke: #252a33 !important;
 }
+
+/* Demo mode — banner rendered above the topbar when the bundle was
+   built for GitHub Pages. The banner pushes the grid down by one row
+   by living outside the grid-template-areas definition. */
+.demo-banner {
+  padding: 8px 16px;
+  background: #3a2f1a;
+  border-bottom: 1px solid #6b4f16;
+  color: #f6e1a6;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.demo-banner__link {
+  color: #ffd37a;
+  text-decoration: underline;
+}
+
+.demo-banner__link:hover {
+  color: #ffe8b0;
+}
+
+/* Copy-DSL button replaces the Run/Stop pair in demo mode. */
+.run-controls__copy {
+  background: #1f3f2a !important;
+  border-color: #2f6344 !important;
+  color: #b9f2c9 !important;
+}
+
+.run-controls__copy:disabled {
+  opacity: 0.5;
+}
+

@@ -6,6 +6,7 @@
 // show a toast or crash the workspace.
 
 import type { RunStatus, StateEntry, TelemetryFrame } from "./types";
+import { demoFetch, isDemoMode } from "../mode/demoMode";
 
 const DEFAULT_BASE = "";
 
@@ -215,5 +216,12 @@ export class ApiClient {
   }
 }
 
-/** Default client that talks to the same origin (via Vite proxy in dev). */
-export const api = new ApiClient();
+/**
+ * Default client. In demo builds (VITE_DEMO_MODE=true) every fetch
+ * goes through the localStorage-backed interceptor in ``demoMode.ts``;
+ * otherwise the client talks to the same origin via the Vite proxy
+ * during development or the FastAPI server in a paired deployment.
+ */
+export const api = isDemoMode()
+  ? new ApiClient({ fetchImpl: demoFetch })
+  : new ApiClient();

@@ -19,7 +19,13 @@ declare const process: { env: Record<string, string | undefined> };
 const BACKEND_ORIGIN =
   process.env.VITE_BACKEND_ORIGIN ?? "http://localhost:8000";
 
+// When the static bundle is deployed to GitHub Pages under a subpath
+// (e.g. /Reactive-Robot/editor/), every asset URL needs that prefix.
+// Local dev keeps the default of "/" so ``npm run dev`` still works.
+const BASE_PATH = process.env.VITE_BASE ?? "/";
+
 export default defineConfig({
+  base: BASE_PATH,
   plugins: [react()],
   server: {
     port: 5173,

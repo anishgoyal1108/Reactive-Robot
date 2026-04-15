@@ -6,3 +6,11 @@ matplotlib>=3.7
 # web/backend test suite — fastapi.testclient.TestClient requires httpx
 httpx>=0.27
 pytest>=8.0
+# Quarto wiki API reference generation.
+# quartodoc 0.11 was the last release tested against griffe 0.x;
+# newer griffe versions changed the numpy docstring parser signature
+# (no `allow_section_blank_line`) and introduced section types the
+# quartodoc md renderer has not learned yet. Pin both until
+# quartodoc 0.12 ships with matching griffe support.
+quartodoc>=0.11,<0.12
+griffe>=0.49,<1.0

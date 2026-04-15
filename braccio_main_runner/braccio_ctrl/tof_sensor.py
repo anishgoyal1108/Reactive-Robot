@@ -28,7 +28,7 @@ import threading
 import time
 import queue
 from collections import deque
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 
@@ -36,9 +36,9 @@ from .imu_state import IMUState
 from .serial_bridge import ensure_serial_device_path
 from .constants import (
     TOF_THRESHOLDS_MM,
-    SENSOR_REPLAN_CHANNELS,
-    SENSOR_ADVISORY_CHANNELS,
-    SENSOR_IGNORE_CHANNELS,
+    TOF_MASKED_SYNTHETIC_MM,
+    TOF_CLOSE_STATUS_CODES,
+    TOF_MUX_TO_CHANNEL,
     IR_DEBOUNCE_ON_SAMPLES,
     IR_DEBOUNCE_OFF_SAMPLES,
     OBSTACLE_HOLD_S,
@@ -79,7 +79,8 @@ IR_ACTIONS = {
 
 class ObstacleResponse:
     CLEAR = "clear"
-    REPLAN = "replan"  # ToF detected — replan trajectory
+    WARN = "warn"  # ToF dipped below threshold — advisory only, no action
+    REPLAN = "replan"  # reserved for BT-driven actual replan events
     BACK_AWAY = "back_away"  # IR detected (ToF missed) — retreat
 
 
@@ -152,6 +153,14 @@ class ToFState:
         self.diag_raw_max_mm: list = [float("nan")] * num_channels
         self.diag_valid_cells: list = [0] * num_channels
         self.diag_zone_count: list = [0] * num_channels
+
+        # Per-zone VL53L5CX target_status matrix (None until firmware sends
+        # the s0..sN trailing field). Used by diagnostics; the parser
+        # already rewrites grids[] in place when it sees a "masked" code.
+        self.statuses: list = [None] * num_channels
+        # Count of cells whose last-frame target_status == 5 ("masked") —
+        # surfaced so tests and session logs can see the promotion happen.
+        self.diag_masked_cells: list = [0] * num_channels
 
     def snapshot(self) -> dict:
         """Return a copy of all display-relevant ToF/IR state."""
@@ -237,16 +246,19 @@ class ToFState:
         """
         Recompute combined obstacle response from ToF + (debounced) IR.
 
-        Channel authority (defined in constants.py):
-          SENSOR_REPLAN_CHANNELS   (CH0, CH1, CH2): trigger REPLAN
-          SENSOR_ADVISORY_CHANNELS (currently empty): reserved for future use
-          SENSOR_IGNORE_CHANNELS   (CH3 — bottom):    completely skipped
+        ToF per-channel threshold breaches produce a ``WARN`` — an advisory
+        that a sensor is reading close but the trajectory planner is NOT
+        being forced to replan. The BT (``safety/behavior.py``) runs its
+        own collision check against the world-model point cloud and
+        publishes ``REPLAN`` through ``safety_snap["last_strategy"]`` when
+        it genuinely reroutes. This split keeps CH3 self-reflection
+        warnings from masquerading as real replans.
 
-        Priority: IR DANGER > IR CLOSE > primary ToF REPLAN > IR FAR > CLEAR.
+        Priority: IR DANGER / CLOSE → BACK_AWAY > any-ch threshold → WARN
+                  > IR FAR (advisory only) > CLEAR.
 
         A hold timer prevents the obstacle_response from relaxing back to
-        CLEAR faster than OBSTACLE_HOLD_S. This is what stops the arm from
-        jerking in place when a ToF reading oscillates across the threshold.
+        CLEAR faster than OBSTACLE_HOLD_S.
         """
         with self._lock:
             now = time.time()
@@ -263,13 +275,11 @@ class ToFState:
                 source = "ir"
                 dist = 0.0
             else:
-                # --- Primary ToF check (SENSOR_REPLAN_CHANNELS only) ---
+                # Per-channel min-distance vs per-channel threshold.
                 closest = float("inf")
                 closest_ch = -1
                 closest_thr = -1.0
                 for ch in range(self.num_channels):
-                    if ch in SENSOR_IGNORE_CHANNELS:   # CH3 (bottom): skip
-                        continue
                     if self.active[ch] == 0:
                         continue
                     g = self.grids[ch]
@@ -281,17 +291,13 @@ class ToFState:
                         if ch < len(self.tof_thresholds_mm)
                         else self.tof_threshold_mm
                     )
-                    if ch in SENSOR_ADVISORY_CHANNELS:
-                        continue
-                    if ch not in SENSOR_REPLAN_CHANNELS:
-                        continue
                     if ch_min < thr and ch_min < closest:
                         closest = ch_min
                         closest_ch = ch
                         closest_thr = thr
 
                 if closest_ch >= 0:
-                    decision = ObstacleResponse.REPLAN
+                    decision = ObstacleResponse.WARN
                     source = f"tof_ch{closest_ch}"
                     dist = closest
                     threshold = closest_thr
@@ -308,7 +314,8 @@ class ToFState:
                 self.obstacle_response = decision
                 self.obstacle_source = source
                 self.obstacle_dist_mm = dist
-                if decision == ObstacleResponse.REPLAN:
+                if decision in (ObstacleResponse.WARN,
+                                ObstacleResponse.REPLAN):
                     self.tof_threshold_mm = threshold
             else:
                 if (
@@ -323,8 +330,8 @@ class ToFState:
 
     @property
     def primary_threshold_mm(self) -> float:
-        """Minimum threshold across primary (REPLAN) channels, for display."""
-        return min(self.tof_thresholds_mm[ch] for ch in SENSOR_REPLAN_CHANNELS)
+        """Minimum threshold across all channels, for display."""
+        return min(self.tof_thresholds_mm) if self.tof_thresholds_mm else float("inf")
 
 
 class ToFBridge:
@@ -479,11 +486,14 @@ class ToFBridge:
     def _parse_tf(self, line: str):
         """
         Parse the TF frame format from vl5_tca_4x4 firmware:
-          TF,<seq>,<mcu_ms>,S<ch>,<ch>,<joint_id>,<status>,<rows>,<cols>,<d0..dN>,<v0..vN>
+          TF,<seq>,<mcu_ms>,S<ch>,<ch>,<joint_id>,<status>,<rows>,<cols>,
+             <d0..dN>,<v0..vN>[,<s0..sN>]
 
-        The sensor_id field is 'S<ch>' (e.g. 'S0'), mux_ch is the integer
-        channel (0-3), rows/cols define the grid (4×4 = 16 zones for this
-        firmware), followed by N distance values then N validity flags.
+        Distance, validity, and (optional) VL53L5CX per-zone target_status.
+        When the status field is present and a zone reports a "close-obstacle
+        but unreliable" code (masked=5, large-pulse=9), its distance is
+        promoted to TOF_MASKED_SYNTHETIC_MM with validity=1 so the safety
+        stack ingests a close-obstacle point instead of dropping the zone.
         """
         s = self._state
         parts = line.split(",")
@@ -494,7 +504,12 @@ class ToFBridge:
             # parts[1] = seq, parts[2] = mcu_ms, parts[3] = sensor_id (S0..S3)
             # parts[4] = mux_ch (int), parts[5] = joint_id (str), parts[6] = status
             # parts[7] = rows, parts[8] = cols
-            ch = int(parts[4])
+            mux_ch = int(parts[4])
+            # Remap the physical MUX channel to the software channel so
+            # the rest of the pipeline sees the "CH0=Top, CH1=Right,
+            # CH2=Left, CH3=Bottom" convention regardless of how the
+            # hardware is wired. See TOF_MUX_TO_CHANNEL in constants.py.
+            ch = TOF_MUX_TO_CHANNEL.get(mux_ch, mux_ch)
             rows = int(parts[7])
             cols = int(parts[8])
             zones = rows * cols
@@ -514,10 +529,52 @@ class ToFBridge:
             raw_min = float(np.min(dist))
             raw_max = float(np.max(dist))
 
-            # Apply validity mask if flags are present
+            # Validity flags (backwards-compat: optional tail).
+            valid: Optional[np.ndarray] = None
             if len(parts) >= data_end + zones:
                 valid = np.array(parts[data_end : data_end + zones], dtype=np.int8)
+
+            # Per-zone VL53L5CX target_status (optional second tail block).
+            # Kept for diagnostics; per-cell promotion only happens for the
+            # codes in TOF_CLOSE_STATUS_CODES (empty by default — codes 5/9
+            # are "ranging OK" per the datasheet, so promoting them would
+            # clobber every normal reading, which is what we used to do).
+            status: Optional[np.ndarray] = None
+            status_start = data_end + zones
+            n_masked = 0
+            if valid is not None and len(parts) >= status_start + zones:
+                try:
+                    status = np.array(
+                        parts[status_start : status_start + zones],
+                        dtype=np.int16,
+                    )
+                    if TOF_CLOSE_STATUS_CODES:
+                        close_mask = np.isin(status, TOF_CLOSE_STATUS_CODES)
+                        if np.any(close_mask):
+                            dist[close_mask] = TOF_MASKED_SYNTHETIC_MM
+                            valid[close_mask] = 1
+                            n_masked = int(np.sum(close_mask))
+                except ValueError:
+                    status = None  # malformed trailing field — ignore
+
+            if valid is not None:
                 dist[valid == 0] = np.nan
+
+            # Whole-frame masked detector: the display used to infer
+            # "masked" from an all-invalid frame (see display.py line
+            # showing "CH{ch}:masked(...)"). That state means the
+            # hardware is saturated — typically a hand flush against
+            # the sensor — so inject a single close-return at the grid
+            # centre and call that zone valid. Without this, the safety
+            # stack never sees the obstacle the user is holding.
+            if (valid is not None
+                    and int(np.sum(valid != 0)) == 0
+                    and zones > 0):
+                centre_r = rows // 2
+                centre_c = cols // 2
+                centre_idx = centre_r * cols + centre_c
+                dist[centre_idx] = TOF_MASKED_SYNTHETIC_MM
+                n_masked = 1
 
             now = time.time()
             grid = dist.reshape((rows, cols))
@@ -533,6 +590,10 @@ class ToFBridge:
                 s.diag_raw_max_mm[ch] = raw_max
                 s.diag_valid_cells[ch] = n_kept
                 s.diag_zone_count[ch] = zones
+                s.diag_masked_cells[ch] = n_masked
+                s.statuses[ch] = (
+                    status.reshape((rows, cols)) if status is not None else None
+                )
 
                 g_valid = grid[~np.isnan(grid)]
                 if g_valid.size > 0:

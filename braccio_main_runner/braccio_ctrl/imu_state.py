@@ -104,6 +104,24 @@ class IMUState:
             self._rot_cache = None
             self._rot_cache_key = None
 
+    def wait_for_frame(self, timeout_s: float = 2.0,
+                       poll_interval_s: float = 0.05) -> bool:
+        """Block until ``update()`` has run at least once, or timeout.
+
+        Used by the controller to avoid running an auto-calibration before
+        the IMU serial stream has delivered its first reading. Returns True
+        if a frame arrived in time, False if the timeout elapsed first.
+        Safe to call from the main thread.
+        """
+        deadline = time.time() + float(timeout_s)
+        while time.time() < deadline:
+            with self._lock:
+                if self.last_rx > 0.0:
+                    return True
+            time.sleep(poll_interval_s)
+        with self._lock:
+            return self.last_rx > 0.0
+
     def yaw_relative(self) -> float:
         """
         Return yaw relative to the calibration pose (degrees).

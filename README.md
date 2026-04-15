@@ -8,6 +8,12 @@
   A 6-DOF Braccio V2 servo arm with synchronous obstacle avoidance, a PyBullet digital twin, and a browser-based block programming editor.
 </p>
 
+<p align="center">
+  <a href="https://anishgoyal1108.github.io/Reactive-Robot/">Wiki</a>
+  ·
+  <a href="https://anishgoyal1108.github.io/Reactive-Robot/editor/">Interactive Block Editor</a>
+</p>
+
 ## Authors
 
 - Anish Goyal [@anishgoyal1108](https://github.com/anishgoyal1108) ([ag29340@georgiasouthern.edu](mailto:ag29340@georgiasouthern.edu))

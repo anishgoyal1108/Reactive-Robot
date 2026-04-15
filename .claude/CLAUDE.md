@@ -21,7 +21,7 @@ The arm should:
 | Arm controller | Arduino Mega (runs existing Braccio firmware) via `/dev/ttyACM0` |
 | Sensor controller | Teensy 4.1 via `/dev/ttyACM1` |
 | ToF sensors | 4× VL53L5CX on TCA9548A I2C mux (channels 0–3), 8×8 distance grid |
-| IR sensors | 4× EC-Buying active-LOW IR obstacle sensors wired to Teensy pins 2–5 |
+| IR sensors | 4× EC-Buying IR obstacle sensors (active-LOW, 5 V) → TI SN74LVC02A NOR inverters @ 3.3 V → Teensy pins 23/22/21/20 (active-HIGH after inversion) |
 | IMU | MPU-6050 on Teensy (roll/pitch from accelerometer, no yaw fusion) |
 
 **Sensor mounting:**
@@ -30,7 +30,7 @@ The arm should:
 - CH2 (top/side): primary obstacle authority — promoted from advisory on 2026-04-10 after a hardware test showed it was silently ignoring a hand held close to the sensor
 - CH3 (bottom): faces ground — completely ignored (floor false positives)
 
-**IR wiring:** All 4 sensors share 5V and GND. Signal pins → Teensy 2, 3, 4, 5. Active LOW with `INPUT_PULLUP`. A count of firing sensors maps to severity: 0=CLEAR, 1=FAR, 2=CLOSE, 3=DANGER.
+**IR wiring:** All 4 sensors share 5 V power and GND. Each sensor's active-LOW signal feeds one input of a TI SN74LVC02A quad NOR gate running at VCC = 3.3 V, with the other NOR input tied to GND so the gate acts as an inverter (and level-clamps the output to a Teensy-safe 3.3 V). NOR outputs route to Teensy pins 23, 22, 21, 20 — **active-HIGH after inversion**. The firmware keeps `INPUT_PULLUP` enabled as a fail-safe: if the NOR chip loses power or a trace opens, the pin floats HIGH and the firmware treats it as an obstacle. A count of firing sensors maps to severity: 0=CLEAR, 1=FAR, 2=CLOSE, 3=DANGER.
 
 ---
 

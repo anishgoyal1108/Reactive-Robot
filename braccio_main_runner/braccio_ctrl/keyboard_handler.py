@@ -35,10 +35,24 @@ class KeyboardHandler:
 
         Blocks at most `tenths * 0.1` seconds.
         """
+        key = self._raw()
+        if key is None:
+            return None
+        return KEY_BINDINGS.get(key, None)
+
+    def get_raw_key(self):
+        """Return the raw curses key int (or None on timeout).
+
+        Used by the manual-mode refusal dialog so the dialog's own R/A/S/O/C
+        bindings aren't eaten by KEY_BINDINGS' IK/gripper mappings.
+        """
+        return self._raw()
+
+    def _raw(self):
         try:
             key = self._scr.getch()
         except curses.error:
             return None
         if key == curses.ERR:
             return None
-        return KEY_BINDINGS.get(key, None)
+        return key

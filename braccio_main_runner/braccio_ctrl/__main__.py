@@ -3,6 +3,13 @@ __main__.py — CLI entry point.
 
   python -m braccio_ctrl [port] [--baud N] [--list-ports]
                          [--teensy-port PORT] [--no-tof]
+                         [--no-ir]
+
+Obstacle avoidance is handled by the safety stack (braccio_ctrl.safety/);
+it is always on and cannot be disabled — the previous --no-guard flag was
+removed in the architecture refactor. If you need to drive the arm toward
+a known obstacle for sensor testing, clear the workspace first or use the
+digital twin.
 
 Live matplotlib plots are provided by standalone companion scripts
 (arm_plotter_app.py, tof_plotter_app.py) that receive data over UDP.

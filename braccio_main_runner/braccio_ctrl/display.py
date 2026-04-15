@@ -36,8 +36,6 @@ import numpy as np
 from .constants import (
     JOINT_LIMITS,
     JOINT_NAMES,
-    SENSOR_ADVISORY_CHANNELS,
-    SENSOR_IGNORE_CHANNELS,
 )
 
 # Color pair indices
@@ -109,22 +107,58 @@ class CursesDisplay:
             row, 0, "JOINT STATUS", curses.color_pair(_C_LABEL) | curses.A_UNDERLINE
         )
         row += 1
+        # Threshold for "near limit" — within this many degrees of either
+        # software limit counts as saturation. Keeps the display honest:
+        # a joint sitting right at its soft floor means IK can't drive it
+        # further that way, so commands in that direction become no-ops.
+        sat_margin_deg = 2.0
+        saturated: list[tuple[str, float, int, int, str]] = []
         for i, (name, angle) in enumerate(zip(JOINT_NAMES, joints)):
             if row >= h - 1:
                 break
             lo, hi = JOINT_LIMITS[i]
             angle_f = float(angle)
+            flag = ""
+            attr = 0
             if np.isfinite(angle_f):
                 pct = (angle_f - lo) / max(hi - lo, 1)
                 filled = max(0, min(_BAR_WIDTH, int(pct * _BAR_WIDTH)))
                 angle_txt = f"{angle_f:5.1f}"
+                if angle_f <= lo + sat_margin_deg:
+                    flag = " !LO"
+                    attr = curses.color_pair(_C_WARN) | curses.A_BOLD
+                    saturated.append((name.strip(), angle_f, lo, hi, "LOW"))
+                elif angle_f >= hi - sat_margin_deg:
+                    flag = " !HI"
+                    attr = curses.color_pair(_C_WARN) | curses.A_BOLD
+                    saturated.append((name.strip(), angle_f, lo, hi, "HIGH"))
             else:
                 filled = 0
                 angle_txt = "  n/a"
             bar = "#" * filled + "-" * (_BAR_WIDTH - filled)
-            line = f"  {name}: {angle_txt}°  [{bar}]  ({lo}–{hi}°)"
-            self._safe_addstr(row, 0, line[: w - 1])
+            line = f"  {name}: {angle_txt}°  [{bar}]  ({lo}–{hi}°){flag}"
+            self._safe_addstr(row, 0, line[: w - 1], attr)
             row += 1
+
+        # Summary line when any joint is saturated — explains that
+        # keypresses in the pinned direction will look like they do
+        # nothing. Important for the shoulder specifically: it carries
+        # the arm's weight and burning PWM into a software-clamped
+        # command is what makes users think the servo is broken.
+        if saturated and row < h - 1:
+            names = ", ".join(
+                f"{n}={a:.0f}° {side}" for n, a, _lo, _hi, side in saturated
+            )
+            line = (
+                f"  SATURATED — {names}  "
+                f"(commands in clamped direction are no-ops)"
+            )
+            self._safe_addstr(
+                row, 0, line[: w - 1],
+                curses.color_pair(_C_WARN) | curses.A_BOLD,
+            )
+            row += 1
+
         return row + 1
 
     def _draw_ik_state(self, row: int, w: int, h: int, state: dict) -> int:
@@ -226,12 +260,9 @@ class CursesDisplay:
             vcel = tof.get("diag_valid_cells", [0] * num_ch)
             zcnt = tof.get("diag_zone_count", [0] * num_ch)
             for ch in range(num_ch):
-                if ch in SENSOR_IGNORE_CHANNELS:
-                    parts.append(f"CH{ch}:[ign]")
-                    continue
                 grid = tof["grids"][ch]
                 thr = thrv[ch] if ch < len(thrv) else 300.0
-                suffix = "(adv)" if ch in SENSOR_ADVISORY_CHANNELS else ""
+                suffix = ""
                 if np.isnan(grid).all():
                     if fcnt[ch] > 0 and zcnt[ch] > 0 and vcel[ch] == 0:
                         # Frames parse but firmware marked every cell invalid
@@ -273,32 +304,77 @@ class CursesDisplay:
             self._safe_addstr(row, 0, line[: w - 1], attr)
             row += 1
 
-        # Obstacle response
+        # Obstacle response — one summary line plus one warning per
+        # triggered ToF channel so simultaneous hits stay visible instead
+        # of fighting over the single-line ERROR slot.
         if row < h - 1:
             obs = state.get("obstacle_response", "clear")
-            src = state.get("obstacle_source", "")
-            dist = state.get("obstacle_dist_mm", -1)
-            thresholds = tof.get("tof_thresholds_mm", [300.0, 300.0, 50.0, 50.0])
-            thresh = min(
-                thresholds[ch]
-                for ch in range(len(thresholds))
-                if ch not in SENSOR_IGNORE_CHANNELS
-            )
+            thresholds = tof.get("tof_thresholds_mm", [100.0, 100.0, 100.0, 50.0])
+            thresh = min(thresholds) if thresholds else 100.0
+
+            num_ch = tof.get("num_channels", 4)
+            triggered: list[tuple[int, float, float]] = []
+            grids = tof.get("grids", [])
+            for ch in range(min(num_ch, len(grids))):
+                grid = grids[ch]
+                if np.isnan(grid).all():
+                    continue
+                mn = float(np.nanmin(grid))
+                thr_ch = thresholds[ch] if ch < len(thresholds) else thresh
+                if mn < thr_ch:
+                    triggered.append((ch, mn, thr_ch))
 
             if obs == "back_away":
-                line = f"  *** OBSTACLE: BACK AWAY (IR, ToF missed!) ***"
+                line = "  *** OBSTACLE: BACK AWAY (IR, ToF missed!) ***"
                 attr = curses.color_pair(_C_ERR) | curses.A_BOLD | curses.A_BLINK
             elif obs == "replan":
-                line = (
-                    f"  OBSTACLE: REPLAN ({src}, {dist:.0f}mm "
-                    f"< {thresh:.0f}mm ch-threshold)"
-                )
+                # BT is actually rerouting — red banner.
+                if triggered:
+                    summary = ", ".join(
+                        f"ch{ch}={mn:.0f}<{thr_ch:.0f}"
+                        for ch, mn, thr_ch in triggered
+                    )
+                    line = f"  OBSTACLE: REPLAN ({summary})"
+                else:
+                    src = state.get("obstacle_source", "")
+                    dist = state.get("obstacle_dist_mm", -1)
+                    line = (
+                        f"  OBSTACLE: REPLAN ({src}, {dist:.0f}mm "
+                        f"< {thresh:.0f}mm ch-threshold)"
+                    )
+                attr = curses.color_pair(_C_ERR) | curses.A_BOLD
+            elif obs == "warn" or triggered:
+                # Advisory only — ToF is reading close but the BT isn't
+                # rerouting. Yellow, not red, so it doesn't read as "the
+                # arm is stuck trying to replan."
+                summary = ", ".join(
+                    f"ch{ch}={mn:.0f}<{thr_ch:.0f}"
+                    for ch, mn, thr_ch in triggered
+                ) or state.get("obstacle_source", "")
+                line = f"  ToF WARN: {summary} (advisory)"
                 attr = curses.color_pair(_C_WARN) | curses.A_BOLD
             else:
-                line = f"  Obstacle: CLEAR  (threshold: {thresh:.0f}mm)"
+                line = f"  Obstacle: CLEAR  (min threshold: {thresh:.0f}mm)"
                 attr = curses.color_pair(_C_OK)
             self._safe_addstr(row, 0, line[: w - 1], attr)
             row += 1
+
+            # Per-channel warning lines — one per triggered channel so
+            # multiple simultaneous hits don't compete for a single
+            # status line. Shown in dim-but-distinct colour beneath the
+            # summary.
+            for ch, mn, thr_ch in triggered:
+                if row >= h - 1:
+                    break
+                warn = (
+                    f"    WARN CH{ch}: {mn:.0f} mm < {thr_ch:.0f} mm "
+                    f"(channel threshold)"
+                )
+                self._safe_addstr(
+                    row, 0, warn[: w - 1],
+                    curses.color_pair(_C_WARN),
+                )
+                row += 1
 
         return row + 1
 

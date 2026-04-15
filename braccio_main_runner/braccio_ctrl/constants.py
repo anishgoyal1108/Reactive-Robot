@@ -7,6 +7,8 @@ Edit link lengths here if your Braccio build differs from the standard:
   L3 = wrist pivot   (M4) → gripper tip
 """
 
+import curses
+
 # ── Link lengths (mm) ─────────────────────────────────────────────────────
 L1 = 125.0
 L2 = 125.0
@@ -111,7 +113,7 @@ TOF_BAUD_RATE       = 115200
 # the user's hand held next to CH2 produced readings in the 41-100mm band,
 # most of which were silently filtered out. Matching CH0/CH1 at 250mm catches
 # the full detection range and still leaves ~98% of idle frames above threshold.
-TOF_THRESHOLDS_MM   = [250.0, 250.0, 250.0, 50.0]
+TOF_THRESHOLDS_MM   = [100.0, 100.0, 100.0, 50.0]
 TOF_THRESHOLD_MM    = TOF_THRESHOLDS_MM[0]   # legacy fallback alias
 TOF_UPSAMPLE_N     = 40       # bilinear upsample resolution for plotting
 TOF_SURFACE_EVERY  = 5        # redraw 3D surface every N frames (performance)
@@ -134,90 +136,113 @@ IR_DEBOUNCE_OFF_SAMPLES    = 5        # need N consecutive clear samples to rele
 # arm from oscillating when a ToF reading sits right on the threshold.
 OBSTACLE_HOLD_S            = 0.5
 
-# ── Autonomous sweep config ───────────────────────────────────────────────
-SWEEP_THETA_MIN            = 0.0      # degrees
-SWEEP_THETA_MAX            = 180.0    # degrees
-SWEEP_R_DEFAULT            = 152.0    # mm  (same as DEFAULT_R)
-SWEEP_Z_DEFAULT            = 35.0     # mm above shoulder — lowered for closer-to-table sweeps
-SWEEP_STEP_DEG             = 2.0      # degrees advanced per tick
-SWEEP_TICK_HZ              = 10.0     # loop rate of the sweep thread (Hz)
-SWEEP_DELTA_NORMAL         = 3        # SET DELTA during normal sweep (higher = smoother)
-SWEEP_DELTA_REPLAN         = 5        # SET DELTA during replanning (max smoothing)
-SWEEP_BACK_STEPS           = 2        # steps to retreat on BACK_AWAY
-SWEEP_OBSTACLE_MARGIN_DEG  = 10.0     # safety margin beyond obstacle edge (deg)
-# Distance (deg) to retreat on a fresh REPLAN entry. Must exceed the ToF
-# half-FOV (OBS_MAP_TOF_FOV_DEG / 2 = 22.5°) so that backing up actually
-# rotates the on-arm sensor FOV off the obstacle instead of just staring
-# at it from a slightly different angle. 30° gives a comfortable margin.
-SWEEP_RETREAT_DEG          = 30.0
-# Command rate limiting — prevents jerk from back-to-back SET ALL commands
-# when obstacle state flaps between clear/replan/back_away.
-SWEEP_MIN_CMD_INTERVAL_S   = 0.12     # minimum seconds between SET ALL commands
-SWEEP_MIN_DELTA_DEG        = 1.0      # minimum joint-delta to send a new command
-# Discrete Z levels (mm) tried during Z-axis replanning, derived from saved states.
-# AutoSweeper searches above current Z first (go over), then below (go under).
-SWEEP_Z_CANDIDATES         = [-20.0, 0.0, 20.0, 55.0, 80.0]
-SWEEP_COLLISION_RADIUS_MM  = 80.0     # pre-command obstacle clearance radius (mm)
-COLLISION_CHECK_RADIUS_MM  = SWEEP_COLLISION_RADIUS_MM   # alias
-
-# ── Motion-guard replan ladder ────────────────────────────────────────────
-# Used by MotionGuard.plan_clear_pose() to find an alternate clear pose
-# when a commanded target (manual IK, saved state, sequence step, HOME)
-# would collide with a known obstacle. Ladder order is: original target,
-# then z-hops at SWEEP_Z_CANDIDATES, then theta nudges, then radial retreat.
-GUARD_PATH_SAMPLES          = 5                                # swept-volume waypoint count
-# Theta nudge steps. Values chosen so the arc distance at r=SWEEP_R_DEFAULT
-# exceeds SWEEP_COLLISION_RADIUS_MM for the larger steps:
-#   arc = 2 * r * sin(Δθ/2)
-#   at r=152: 30°→78.7mm (still inside sphere), 45°→116mm (clear), 60°→152mm.
-# Smaller steps stay for precision when the obstacle sits off the exact target.
-GUARD_THETA_NUDGE_STEPS_DEG = [5.0, 10.0, 20.0, 30.0, 45.0, 60.0]
-# Radial retreat step must exceed SWEEP_COLLISION_RADIUS_MM for the last
-# rung to escape a point obstacle at the original r — 100mm gives a clear
-# 20mm margin beyond the 80mm sphere.
-GUARD_R_RETREAT_STEPS_MM    = [20.0, 40.0, 60.0, 80.0, 100.0]
-
-# ── Obstacle map config ───────────────────────────────────────────────────
-OBS_MAP_MAX_AGE_S          = 2.0     # seconds before stale cloud points are discarded
-OBS_MAP_TOF_FOV_DEG        = 45.0    # VL53L5CX full horizontal/vertical FoV
-OBS_MAP_GRID_SIZE          = 8       # 8×8 sensor grid
-
-# ── Persistent obstacle memory (voxel confidence map) ─────────────────────
-OBS_MEM_CELL_MM            = 40.0    # voxel edge length in mm
-OBS_MEM_MAX_CELLS          = 2000    # cap to bound memory and lookup time
-OBS_MEM_INC                = 0.30    # confidence increment on observation
-OBS_MEM_DECAY_PER_SEC      = 0.15    # confidence decay rate per second
-OBS_MEM_KEEP_THRESHOLD     = 0.05    # prune cells below this confidence
-OBS_MEM_OCCUPIED_THRESHOLD = 0.20    # considered occupied above this confidence
-
-# Sensor mount offsets from end-effector, in mm [x, y, z]
-# Tune these values to match the physical sensor positions on the arm
-SENSOR_MOUNT_FRONT_OFFSET  = [60.0,  0.0,  0.0]
-SENSOR_MOUNT_BACK_OFFSET   = [-60.0, 0.0,  0.0]
-SENSOR_MOUNT_TOP_OFFSET    = [0.0,   0.0,  30.0]
-SENSOR_MOUNT_BOTTOM_OFFSET = [0.0,   0.0, -30.0]
-
-# Sensor channel authority classification.
+# ── Safety stack tuning (see braccio_ctrl/safety/) ────────────────────────
+# The obstacle-avoidance architecture is point-cloud + KDTree + capsule
+# collision checking + BiRRT, orchestrated by a py_trees behavior tree.
+# See research.md / research_output.pdf + ~/.claude/plans/calm-sprouting-shell.md
+# for the design rationale; every constant here maps to a section of that
+# document.
 #
-# REPLAN channels are the authoritative obstacle sensors. Any reading below
-# the channel's threshold triggers `ObstacleResponse.REPLAN`, pauses the
-# autonomous sweep, AND fires the live-sensor gate in MotionGuard so any
-# manual command that isn't an unambiguous retreat is rejected. The persistent
-# voxel memory is populated from every non-ignored channel, so obstacles seen
-# by a REPLAN channel are also remembered for future collision checks.
-#
-# CH3 (bottom, ground-facing) is ignored — it always reads the floor.
-#
-# Historical note: CH2 used to be advisory-only because the "top" sensor was
-# expected to occasionally see the arm's own structure. A 2026-04-10 session
-# log proved otherwise — CH2 readings are overwhelmingly >1m in idle, so
-# promoting it to REPLAN authority is safe and closes a real blind spot that
-# let the arm sweep past the user's hand during manual control.
-SENSOR_REPLAN_CHANNELS   = [0, 1, 2]
-SENSOR_PRIMARY_CHANNELS  = SENSOR_REPLAN_CHANNELS   # alias
-SENSOR_ADVISORY_CHANNELS: list[int] = []   # reserved; currently empty
-# CH3 (bottom): ignored — very close to ground, assume sufficient clearance
-SENSOR_IGNORE_CHANNELS   = [3]
+# ToF hysteresis — Schmitt trigger engage / disengage (§7). Per-channel
+# deadband. CH0 (front) keeps the generous 250/350 window because it's the
+# authoritative "obstacle ahead of the sweep direction" channel. CH1/CH2
+# are the side-facing sensors; the 250 mm window was pulling in the arm's
+# own structure and the hardware rig, so we use a tighter 100/180 window.
+# CH3 is ignored (ground).
+TOF_ENGAGE_MM            = [100.0, 100.0, 100.0,  50.0]
+TOF_DISENGAGE_MM         = [180.0, 180.0, 180.0, 100.0]
+
+# Joint command smoothing — EMA α (§7, DeXtreme default).
+JOINT_COMMAND_EMA_ALPHA  = 0.2
+# Backstop rate clamp applied after EMA (deg per BT tick).
+JOINT_RATE_MAX_DEG       = 5.0
+
+# Capsule clearance — margin added to each link's capsule radius before the
+# collision check. Swallows FK rounding, commanded-vs-actual servo drift,
+# and ToF noise.
+CAPSULE_CLEARANCE_MM     = 30.0
+
+# Projected ToF points closer than (capsule_radius + this) to any arm link
+# are dropped at ingest — prevents the arm's own structure from being logged
+# as a permanent obstacle that deadlocks the planner.
+TOF_SELF_FILTER_MARGIN_MM = 40.0
+
+# Physical MUX channel → software channel remap. The Teensy firmware
+# selects TCA9548A channels 0-3 in hardware order and labels them S0-S3
+# on serial, but the wiring actually pairs them:
+#   MUX 0 ↔ LEFT sensor   → software CH2
+#   MUX 1 ↔ RIGHT sensor  → software CH1
+#   MUX 2 ↔ TOP sensor    → software CH0
+#   MUX 3 ↔ BOTTOM sensor → software CH3
+# Applied once in tof_sensor._parse_tf so every downstream consumer
+# (display, obstacle decision, safety ingest) sees a consistent
+# "CH0=Top, CH1=Right, CH2=Left, CH3=Bottom" convention.
+TOF_MUX_TO_CHANNEL = {0: 2, 1: 1, 2: 0, 3: 3}
+
+# Synthetic distance (mm) injected when a ToF frame is fully masked
+# (every zone invalid but frames are arriving). Sits just below the
+# engage threshold so the Schmitt trigger fires immediately.
+TOF_MASKED_SYNTHETIC_MM = 60.0
+
+# VL53L5CX target_status codes that unambiguously indicate a close-
+# obstacle / saturation scenario. IMPORTANT: codes 5 and 9 are the
+# *normal valid* codes per the SparkFun / ST datasheet ("5 & 9 means
+# ranging OK") — do NOT include them here. We only promote on codes
+# that clearly mean "sensor is saturated or seeing something too close
+# to measure". Conservatively empty by default; the masked-frame
+# detector (all zones invalid) covers the hand-over-sensor case without
+# needing per-cell status heuristics.
+TOF_CLOSE_STATUS_CODES: tuple[int, ...] = ()
+
+# BiRRT fallback budget for the "go around the obstacle" sweep escape hatch
+# (safety/behavior.py). Fires only when the z-ladder is fully exhausted; the
+# resulting path is cached in the blackboard so follow-up ticks stream
+# waypoints at ~3 ms each instead of replanning.
+SWEEP_BIRRT_FALLBACK_TIMEOUT_S = 0.8
+
+# BiRRT tuning (§2).
+BIRRT_TIMEOUT_S          = 2.0
+BIRRT_EXTEND_DEG         = 5.0
+
+# WorldModel — point-cloud aging and KDTree rebuild cadence (§3).
+WORLD_MAX_AGE_S          = 15.0
+WORLD_KDTREE_REBUILD_S   = 0.5
+
+# Sweep configuration (§7).
+SWEEP_R_DEFAULT_MM       = 152.0
+SWEEP_Z_DEFAULT_MM       = 35.0
+SWEEP_STEP_DEG           = 5.0     # was 2.0 — sweeps the full 0→180 range noticeably faster
+SWEEP_PRE_SCAN_WAYPOINTS = 5
+SWEEP_SKIP_MARGIN_DEG    = 10.0
+SWEEP_FOV_HALF_DEG       = 22.5    # VL53L5CX per-axis FoV half-angle
+# Alternate Z levels tried when the current slice is entirely blocked.
+# The sweep branch walks these in order, sticking with the first that has
+# a reachable unblocked angle in the direction of travel.
+SWEEP_Z_LADDER_MM        = [35.0, 60.0, 90.0, 10.0, -20.0]
+
+# Sequence replanner (§6).
+SEQUENCE_MAX_RETRIES     = 3
+
+# Behavior tree tick rate. Bumped from 10 → 20 so sweep + manual-hold feel
+# responsive; each plan is still <50 ms on commodity CPUs so the tick
+# budget is comfortable.
+BT_TICK_HZ               = 20.0
+
+# ── User experience toggles ───────────────────────────────────────────────
+# Strict mode: when False (default) every safety refusal is handled
+# silently — the manual branch just doesn't advance the arm and the user
+# can press the key again. When True, a curses refusal dialog opens with
+# Retreat / Axis / Step / Override / Cancel choices bound to F1–F5.
+STRICT_MODE_DEFAULT      = False
+# Absolute path to the sound file played on every obstacle-triggered
+# refusal / replan. Blank string disables the sound.
+import os as _os
+OBSTACLE_SOUND_PATH      = _os.path.join(
+    _os.path.dirname(_os.path.abspath(__file__)), "..", "completion-fail.oga"
+)
+OBSTACLE_SOUND_PATH      = _os.path.abspath(OBSTACLE_SOUND_PATH)
+# Minimum seconds between successive sound plays (rate-limit).
+OBSTACLE_SOUND_COOLDOWN_S = 1.5
 
 # ── Key bindings: curses key code → action string ─────────────────────────
 # fmt: off
@@ -244,32 +269,35 @@ KEY_BINDINGS = {
     ord('M'): 'states_menu',
     ord('x'): 'seq_editor',   # Sequence editor
     ord('X'): 'seq_editor',
-    ord('0'): 'plot_main_toggle',
-    ord('1'): 'plot_joint_1_toggle',
-    ord('2'): 'plot_joint_2_toggle',
-    ord('3'): 'plot_joint_3_toggle',
-    ord('4'): 'plot_joint_4_toggle',
-    ord('5'): 'plot_joint_5_toggle',
-    ord('6'): 'plot_joint_6_toggle',
-    ord('7'): 'plot_reset',
-    ord('8'): 'plot_screenshot',
-    ord('9'): 'plot_log_toggle',
-    # ── ToF / IR sensor controls ─────────────────────────────────────────
-    ord('v'): 'tof_view_toggle',
-    ord('V'): 'tof_view_toggle',
-    ord('b'): 'tof_export_csv',
-    ord('B'): 'tof_export_csv',
-    ord('n'): 'tof_screenshot',
-    ord('N'): 'tof_screenshot',
-    ord('g'): 'tof_log_toggle',
-    ord('G'): 'tof_log_toggle',
-    ord('f'): 'tof_threshold_inc',
-    ord('F'): 'tof_threshold_dec',
     # ── Sweep / IMU controls ──────────────────────────────────────────────
     ord('z'): 'sweep_toggle',
     ord('Z'): 'sweep_toggle',
     ord('c'): 'imu_calibrate',
     ord('C'): 'imu_calibrate',
+    # ── Strict-mode toggle (safety dialog on/off) ────────────────────────
+    # Pressing 't' flips between silent auto-replan (default) and the
+    # strict refusal-dialog mode. Bound away from the legacy IK keys so
+    # nothing conflicts.
+    ord('t'): 'strict_toggle',
+    ord('T'): 'strict_toggle',
+    # ── Arrow-key manual-IK alternatives ─────────────────────────────────
+    # Sit alongside WASD so the user can hold keys without those WASD
+    # positions conflicting with the strict-mode refusal-dialog choices.
+    # Terminals usually emit KEY_LEFT/RIGHT etc. for numpad with NumLock
+    # off, so the numpad still works via these bindings.
+    curses.KEY_LEFT:  'theta_dec',
+    curses.KEY_RIGHT: 'theta_inc',
+    curses.KEY_UP:    'r_inc',
+    curses.KEY_DOWN:  'r_dec',
+    curses.KEY_PPAGE: 'z_inc',      # PgUp / numpad 9 (NumLock off)
+    curses.KEY_NPAGE: 'z_dec',      # PgDn / numpad 3 (NumLock off)
+    # ── Refusal-dialog function keys (only consumed in strict mode) ──────
+    # Using F1–F5 means these never collide with any manual key.
+    curses.KEY_F1: 'dialog_retreat',
+    curses.KEY_F2: 'dialog_axis',
+    curses.KEY_F3: 'dialog_step',
+    curses.KEY_F4: 'dialog_override',
+    curses.KEY_F5: 'dialog_cancel',
     27:       'quit',          # ESC
 }
 # fmt: on

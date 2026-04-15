@@ -20,6 +20,13 @@ const L1 = 0.125;
 const L2 = 0.125;
 const L3 = 0.060;
 
+// Gripper servo range — Arduino Braccio convention: 10° = closed,
+// 73° = wide open. We linearly interpolate each finger to a rotation
+// inside [0, GRIPPER_MAX_ANGLE] so the two fingers scissor apart.
+const GRIPPER_CLOSED_SERVO = 10;
+const GRIPPER_OPEN_SERVO = 73;
+const GRIPPER_MAX_ANGLE = Math.PI / 4;
+
 export function Arm() {
   // Pull the latest joints every frame via refs so React doesn't
   // rerender on every WS message. This is the standard r3f pattern
@@ -29,29 +36,43 @@ export function Arm() {
   const elbowRef = useRef<Group>(null);
   const wristVertRef = useRef<Group>(null);
   const wristRotRef = useRef<Group>(null);
+  const leftFingerRef = useRef<Group>(null);
+  const rightFingerRef = useRef<Group>(null);
 
   useFrame(() => {
     const js = useTelemetryStore.getState().joints;
+    // URDF joint axes (see braccio.urdf):
+    //   joint_base       → Z   (vertical "twist" of the whole arm)
+    //   joint_shoulder   → Y
+    //   joint_elbow      → Y
+    //   joint_wrist_vert → Y
+    //   joint_wrist_rot  → X
+    // The outer <group rotation={[-π/2, 0, 0]}> below rotates the
+    // whole URDF frame so URDF +Z → world +Y, but inside that group
+    // every child still works in URDF-local coordinates. That means
+    // the LOCAL rotation axes used here map directly to the URDF
+    // joint axes — base spins around its own Z, shoulder/elbow/
+    // wrist_vert all hinge around Y, and wrist_rot rolls around X.
     if (baseRef.current) {
-      baseRef.current.rotation.y = braccioDegreesToUrdfRadians(
+      baseRef.current.rotation.z = braccioDegreesToUrdfRadians(
         "joint_base",
         js[0],
       );
     }
     if (shoulderRef.current) {
-      shoulderRef.current.rotation.z = -braccioDegreesToUrdfRadians(
+      shoulderRef.current.rotation.y = braccioDegreesToUrdfRadians(
         "joint_shoulder",
         js[1],
       );
     }
     if (elbowRef.current) {
-      elbowRef.current.rotation.z = braccioDegreesToUrdfRadians(
+      elbowRef.current.rotation.y = braccioDegreesToUrdfRadians(
         "joint_elbow",
         js[2],
       );
     }
     if (wristVertRef.current) {
-      wristVertRef.current.rotation.z = braccioDegreesToUrdfRadians(
+      wristVertRef.current.rotation.y = braccioDegreesToUrdfRadians(
         "joint_wrist_vert",
         js[3],
       );
@@ -61,6 +82,25 @@ export function Arm() {
         "joint_wrist_rot",
         js[4],
       );
+    }
+    // Gripper: linearly interpolate per-finger rotation from the
+    // gripper servo value. The two fingers mirror each other around
+    // the wrist axis so they "scissor" open as the servo opens.
+    const gripperServo = js[5] ?? GRIPPER_CLOSED_SERVO;
+    const t = Math.max(
+      0,
+      Math.min(
+        1,
+        (gripperServo - GRIPPER_CLOSED_SERVO) /
+          (GRIPPER_OPEN_SERVO - GRIPPER_CLOSED_SERVO),
+      ),
+    );
+    const fingerAngle = t * GRIPPER_MAX_ANGLE;
+    if (leftFingerRef.current) {
+      leftFingerRef.current.rotation.z = fingerAngle;
+    }
+    if (rightFingerRef.current) {
+      rightFingerRef.current.rotation.z = -fingerAngle;
     }
   });
 
@@ -78,8 +118,16 @@ export function Arm() {
 
       {/* joint_base: revolute Z at top of base */}
       <group ref={baseRef} position={[0, 0, 0.060]}>
-        {/* shoulder_pillar_link */}
-        <mesh position={[0, 0, 0.005]} castShadow>
+        {/* shoulder_pillar_link — cylinderGeometry is Y-axis by
+            default; rotate +π/2 around X so its height aligns with
+            the parent group's +Z (which maps to world +Y "up" via the
+            top-level frame rotation). Without this the disc ends up
+            lying horizontally instead of standing on the platform. */}
+        <mesh
+          position={[0, 0, 0.005]}
+          rotation={[Math.PI / 2, 0, 0]}
+          castShadow
+        >
           <cylinderGeometry args={[0.035, 0.035, 0.010, 24]} />
           <meshStandardMaterial color="#1a59c0" />
         </mesh>
@@ -128,15 +176,58 @@ export function Arm() {
                   <meshStandardMaterial color="#26262e" />
                 </mesh>
 
-                {/* gripper_link (fixed extension of L3 past the wrist) */}
-                <mesh
-                  position={[L3, 0, 0]}
-                  rotation={[0, 0, Math.PI / 2]}
-                  castShadow
-                >
-                  <cylinderGeometry args={[0.012, 0.012, 0.040, 16]} />
-                  <meshStandardMaterial color="#b3b3bb" />
-                </mesh>
+                {/* Gripper assembly — replaces the URDF's placeholder
+                    cylinder with a palm box + two pivoting finger
+                    boxes so the visual mirrors the real Braccio claw
+                    and actually opens/closes from the gripper servo
+                    angle. The palm fills the back ~⅔ of the URDF
+                    L3 stub; the fingers extend from the palm front
+                    out to L3 and pivot around their local +Z (URDF
+                    up) so they scissor apart symmetrically. */}
+                {(() => {
+                  const PALM_LENGTH = L3 * 0.4; // 24 mm
+                  const FINGER_LENGTH = L3 - PALM_LENGTH; // 36 mm
+                  return (
+                    <>
+                      <mesh
+                        position={[PALM_LENGTH / 2, 0, 0]}
+                        castShadow
+                      >
+                        <boxGeometry args={[PALM_LENGTH, 0.036, 0.024]} />
+                        <meshStandardMaterial color="#8d8d94" />
+                      </mesh>
+
+                      {/* left finger — hinges at the front-left
+                          corner of the palm. */}
+                      <group
+                        position={[PALM_LENGTH, 0.014, 0]}
+                        ref={leftFingerRef}
+                      >
+                        <mesh
+                          position={[FINGER_LENGTH / 2, 0.004, 0]}
+                          castShadow
+                        >
+                          <boxGeometry args={[FINGER_LENGTH, 0.008, 0.020]} />
+                          <meshStandardMaterial color="#cfcfd4" />
+                        </mesh>
+                      </group>
+
+                      {/* right finger — mirror of the left. */}
+                      <group
+                        position={[PALM_LENGTH, -0.014, 0]}
+                        ref={rightFingerRef}
+                      >
+                        <mesh
+                          position={[FINGER_LENGTH / 2, -0.004, 0]}
+                          castShadow
+                        >
+                          <boxGeometry args={[FINGER_LENGTH, 0.008, 0.020]} />
+                          <meshStandardMaterial color="#cfcfd4" />
+                        </mesh>
+                      </group>
+                    </>
+                  );
+                })()}
               </group>
             </group>
           </group>

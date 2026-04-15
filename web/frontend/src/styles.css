@@ -15,6 +15,9 @@ body,
 
 .app-shell {
   display: grid;
+  /* Left column width is overridden from App.tsx via inline style so
+     the drag handle + collapse toggle can drive it dynamically. The
+     static value here is only the fallback for the initial paint. */
   grid-template-columns: 480px 1fr 280px;
   grid-template-rows: 48px 1fr;
   height: 100vh;
@@ -35,13 +38,59 @@ body,
   font-weight: 600;
 }
 
+.app-shell__topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.topbar-toggle {
+  background: #1f2937;
+  color: #e6e6e6;
+  border: 1px solid #374151;
+  border-radius: 4px;
+  padding: 2px 10px;
+  font-size: 16px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.topbar-toggle:hover {
+  background: #2b3442;
+}
+
 .app-shell__left {
   grid-area: left;
   border-right: 1px solid #252a33;
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0;
   overflow: hidden;
+  position: relative;
+}
+
+.app-shell__left--collapsed {
+  /* Grid column is already 0 wide; belt-and-braces so Blockly can't
+     catch stray pointer events while it's hidden. */
+  visibility: hidden;
+}
+
+.app-shell__resize-handle {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  bottom: 0;
+  width: 6px;
+  cursor: ew-resize;
+  background: transparent;
+  z-index: 20;
+  touch-action: none;
+}
+
+.app-shell__resize-handle:hover,
+.app-shell__resize-handle:active {
+  background: rgba(59, 130, 246, 0.35);
 }
 
 .app-shell__left-header {
@@ -416,4 +465,74 @@ body,
 
 .modal__confirm--danger:hover:not(:disabled) {
   background: #991b1b;
+}
+
+/* ── Blockly dark-theme overrides ─────────────────────────────────
+   The built-in Classic theme renders the toolbox with dark grey
+   category labels on slightly lighter grey — on our dark app chrome
+   that's close to unreadable. Override the tree row + label colours
+   directly so the category names pop against the sidebar background.
+   These class names are stable across Blockly v10/v11. */
+
+.blocklyToolboxDiv,
+.blocklyToolbox {
+  background-color: #131720 !important;
+  border-right: 1px solid #252a33 !important;
+  padding-top: 6px !important;
+}
+
+.blocklyTreeRow {
+  padding: 6px 10px !important;
+  margin: 2px 4px !important;
+  border-radius: 4px !important;
+  height: auto !important;
+  line-height: 22px !important;
+}
+
+.blocklyTreeRow:not(.blocklyTreeSelected):hover {
+  background-color: #1f2937 !important;
+}
+
+.blocklyTreeSelected {
+  background-color: #1d4ed8 !important;
+}
+
+.blocklyTreeLabel {
+  color: #f3f4f6 !important;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    Roboto, sans-serif !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  padding-left: 6px !important;
+}
+
+.blocklyTreeSelected .blocklyTreeLabel {
+  color: #ffffff !important;
+}
+
+/* The small colour swatch Blockly draws before each category label.
+   Bump it up so it reads as a tag, not a line. */
+.blocklyTreeRow .blocklyTreeIcon {
+  width: 6px !important;
+  border-radius: 2px !important;
+  margin-right: 4px !important;
+}
+
+/* Flyout (the panel that pops out when a category is clicked). */
+.blocklyFlyout {
+  background-color: #0f141b !important;
+}
+
+.blocklyFlyoutBackground {
+  fill: #0f141b !important;
+  fill-opacity: 0.98 !important;
+}
+
+.blocklyFlyoutScrollbar .blocklyScrollbarHandle {
+  fill: #374151 !important;
+}
+
+/* Main workspace background under the blocks. */
+.blocklyMainBackground {
+  stroke: #252a33 !important;
 }

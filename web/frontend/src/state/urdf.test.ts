@@ -19,10 +19,10 @@ const SAMPLE = `<?xml version="1.0"?>
     <axis xyz="0 1 0"/>
     <limit lower="0" upper="3.14159" effort="5" velocity="3.14"/>
   </joint>
-  <joint name="mount_tof_front" type="fixed">
+  <joint name="mount_tof_up" type="fixed">
     <parent link="wrist_roll_link"/>
-    <child link="tof_front_link"/>
-    <origin xyz="0.025 0 0" rpy="0 0 0"/>
+    <child link="tof_up_link"/>
+    <origin xyz="0.010 0 0.020" rpy="0 -1.5708 0"/>
   </joint>
 </robot>`;
 
@@ -34,7 +34,7 @@ describe("parseBraccioUrdf", () => {
     const names = robot.joints.map((j) => j.name);
     expect(names).toContain("joint_base");
     expect(names).toContain("joint_elbow");
-    expect(names).toContain("mount_tof_front");
+    expect(names).toContain("mount_tof_up");
   });
 
   it("parses origin xyz/rpy and axis", () => {
@@ -51,7 +51,7 @@ describe("parseBraccioUrdf", () => {
     expect(base!.limit).toBeDefined();
     expect(base!.limit!.lower).toBeCloseTo(-1.5708, 3);
     expect(base!.limit!.upper).toBeCloseTo(1.5708, 3);
-    const mount = robot.joints.find((j) => j.name === "mount_tof_front");
+    const mount = robot.joints.find((j) => j.name === "mount_tof_up");
     expect(mount!.limit).toBeUndefined();
     expect(mount!.type).toBe("fixed");
   });

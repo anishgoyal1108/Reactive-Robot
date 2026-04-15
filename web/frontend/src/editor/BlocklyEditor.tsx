@@ -114,7 +114,18 @@ export function BlocklyEditor(props: BlocklyEditorProps): JSX.Element {
     const handleResize = () => Blockly.svgResize(workspace);
     window.addEventListener("resize", handleResize);
 
+    // Also watch the container itself — the left sidebar can be
+    // dragged/collapsed without triggering a window resize, and
+    // Blockly's SVG won't re-fit on its own. ResizeObserver covers
+    // any layout change that moves the target's bounding box.
+    const resizeObserver =
+      typeof ResizeObserver !== "undefined"
+        ? new ResizeObserver(() => Blockly.svgResize(workspace))
+        : null;
+    resizeObserver?.observe(target);
+
     return () => {
+      resizeObserver?.disconnect();
       window.removeEventListener("resize", handleResize);
       workspace.removeChangeListener(emit);
       workspace.dispose();

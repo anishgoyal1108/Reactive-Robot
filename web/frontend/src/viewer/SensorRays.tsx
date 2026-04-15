@@ -12,8 +12,11 @@
 import { useTelemetryStore } from "../state/telemetry";
 
 // Distance (mm) below which a ToF reading is considered "blocked".
-// Matches braccio_ctrl.constants.TOF_THRESHOLDS_MM[0..2].
-const BLOCK_THRESHOLD_MM = 250;
+// Matches braccio_ctrl.constants.TOF_THRESHOLDS_MM (CH0-2 = 100 mm,
+// CH3 = 50 mm); we use the conservative side-channel value for the
+// viewer so CH3 turns yellow around the same relative distance as the
+// others without a per-channel colour ramp.
+const BLOCK_THRESHOLD_MM = 100;
 
 function tofColor(distanceMm: number): string {
   if (distanceMm < BLOCK_THRESHOLD_MM * 0.5) return "#ef4444";
@@ -37,16 +40,20 @@ export function SensorRays() {
   const tof = useTelemetryStore((s) => s.tof);
   const ir = useTelemetryStore((s) => s.ir);
 
-  // Arrange the 4 ToF indicators in a + pattern around the base.
+  // Channel → physical direction (matches ``safety/api.py`` _MOUNT_BY_CHANNEL
+  // and the URDF tof_*_link definitions).
+  //   CH0 = Top, CH1 = Right, CH2 = Left, CH3 = Bottom
+  // World frame here is three.js: +X right, +Y up, +Z out of screen. So
+  // top/bottom stack on Y, right/left on X, around the base.
   const TOF_LAYOUT: Array<{
     channel: number;
     position: [number, number, number];
     label: string;
   }> = [
-    { channel: 0, position: [0.20, 0.07, 0.0], label: "CH0" },
-    { channel: 1, position: [-0.20, 0.07, 0.0], label: "CH1" },
-    { channel: 2, position: [0.0, 0.07, 0.20], label: "CH2" },
-    { channel: 3, position: [0.0, 0.07, -0.20], label: "CH3" },
+    { channel: 0, position: [0.0, 0.15, 0.0],  label: "CH0 Top" },
+    { channel: 1, position: [0.20, 0.07, 0.0], label: "CH1 Right" },
+    { channel: 2, position: [-0.20, 0.07, 0.0], label: "CH2 Left" },
+    { channel: 3, position: [0.0, -0.02, 0.0], label: "CH3 Bottom" },
   ];
 
   return (
@@ -61,9 +68,11 @@ export function SensorRays() {
           />
         </mesh>
       ))}
-      {/* IR severity ring — larger sphere sitting directly over the
-          base so a kid can see "the whole arm is about to stop". */}
-      <mesh position={[0, 0.09, 0]}>
+      {/* IR severity ring — lays flat on the platform so it reads as
+          a halo around the arm base rather than a vertical hula-hoop.
+          torusGeometry defaults to the XY plane (normal +Z); rotating
+          -π/2 around X puts it in the XZ plane (normal +Y = world up). */}
+      <mesh position={[0, 0.062, 0]} rotation={[-Math.PI / 2, 0, 0]}>
         <torusGeometry args={[0.080, 0.005, 8, 32]} />
         <meshStandardMaterial
           color={irColor(ir)}

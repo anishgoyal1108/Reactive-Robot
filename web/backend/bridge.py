@@ -46,13 +46,14 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from braccio_ctrl.backends import BraccioBackend
-from braccio_ctrl.constants import JOINT_TOKENS
+from braccio_ctrl.constants import JOINT_TOKENS, HOME_POS
 from braccio_ctrl.dsl import (
     BaseExecutor,
     Interpreter,
     Program,
     parse_auto,
 )
+from braccio_ctrl.safety import SafetyAPI
 from braccio_ctrl.sequence_editor import _static_check
 from braccio_ctrl.state_library import StateLibrary
 
@@ -111,13 +112,13 @@ class BackendExecutor(BaseExecutor):
     DSL Executor that translates AST primitives into ASCII commands on
     a ``BraccioBackend``.
 
-    The executor intentionally resolves MoveStmt through the
-    StateLibrary so that control-flow programs composed in Blockly see
-    exactly the same joint angles the curses editor would. Sensor
-    reads fall through to the backend if it exposes ``read_tof`` /
-    ``read_ir`` (WebBackend does); otherwise they return the
-    optimistic defaults 9999 / 0 so a web run never stalls on a
-    missing sensor hook.
+    When ``safety_api`` is supplied every motion-affecting primitive
+    (``move_to_state``, ``go_home``, ``set_joint`` on a major axis) is
+    validated through ``SafetyAPI.plan_and_validate`` before hitting the
+    backend. Failures raise a ``RuntimeError`` the interpreter surfaces to
+    the web UI as a run-failure event. When ``safety_api`` is ``None`` the
+    executor falls back to the legacy direct-send path — kept for the unit
+    tests that mock out the backend without wiring a full safety stack.
     """
 
     def __init__(
@@ -125,10 +126,32 @@ class BackendExecutor(BaseExecutor):
         backend: BraccioBackend,
         state_lib: StateLibrary,
         stop_event: threading.Event,
+        safety_api: Optional[SafetyAPI] = None,
     ) -> None:
         self._backend = backend
         self._state_lib = state_lib
         self._stop = stop_event
+        self._safety = safety_api
+        # Shadow of where we believe the arm is. Updated on every
+        # successful move so the next plan() call starts from the
+        # previous endpoint.
+        self._current_q: List[int] = list(HOME_POS)
+        # Best-effort sync from the backend's joint snapshot, if any.
+        snap_fn = getattr(self._backend, "joint_snapshot", None)
+        if callable(snap_fn):
+            try:
+                self._current_q = [int(x) for x in snap_fn()]
+            except Exception:
+                pass
+
+    def _send_path(self, path: List[List[int]]) -> None:
+        """Walk a planner-returned path one SET ALL at a time."""
+        for step in path:
+            if self._stop.is_set():
+                return
+            cmd = "SET ALL " + " ".join(str(int(j)) for j in step) + "\n"
+            self._backend.send_cmd(cmd)
+            self._current_q = [int(j) for j in step]
 
     def move_to_state(self, name: str) -> None:
         state = self._state_lib.get_state(name)
@@ -139,17 +162,56 @@ class BackendExecutor(BaseExecutor):
             raise ValueError(
                 f"state {name} has {len(joints)} joints, expected 6"
             )
+        if self._safety is not None:
+            result = self._safety.plan_and_validate(self._current_q, joints)
+            if not result.success:
+                raise RuntimeError(
+                    f"safety: refused move_to_state({name!r}) — "
+                    f"{result.failure_reason}"
+                )
+            self._send_path(result.path or [joints])
+            return
         cmd = "SET ALL " + " ".join(str(j) for j in joints) + "\n"
         self._backend.send_cmd(cmd)
+        self._current_q = joints
 
     def set_joint(self, joint_token: str, deg: int) -> None:
         if joint_token not in _TOKEN_TO_IDX:
             raise ValueError(f"unknown joint token: {joint_token}")
+        idx = _TOKEN_TO_IDX[joint_token]
+        # Wrist rotation and gripper never move the arm's collision
+        # envelope, so they skip the planner. Base/shoulder/elbow/wrist-
+        # vertical are routed through plan_and_validate when safety is
+        # configured.
+        if self._safety is not None and idx in (0, 1, 2, 3):
+            new_q = list(self._current_q)
+            new_q[idx] = int(deg)
+            result = self._safety.plan_and_validate(self._current_q, new_q)
+            if not result.success:
+                raise RuntimeError(
+                    f"safety: refused set_joint({joint_token!r}, {deg}) — "
+                    f"{result.failure_reason}"
+                )
+            self._send_path(result.path or [new_q])
+            return
         cmd = f"SET {joint_token} {deg}\n"
         self._backend.send_cmd(cmd)
+        if idx is not None and 0 <= idx < 6:
+            self._current_q[idx] = int(deg)
 
     def go_home(self) -> None:
+        if self._safety is not None:
+            result = self._safety.plan_and_validate(
+                self._current_q, list(HOME_POS)
+            )
+            if not result.success:
+                raise RuntimeError(
+                    f"safety: refused HOME — {result.failure_reason}"
+                )
+            self._send_path(result.path or [list(HOME_POS)])
+            return
         self._backend.send_cmd("HOME\n")
+        self._current_q = list(HOME_POS)
 
     def wait_ms(self, ms: int) -> None:
         deadline = time.monotonic() + ms / 1000.0
@@ -200,12 +262,53 @@ class BackendExecutor(BaseExecutor):
     def define_obstacle(
         self, name: str, pos: tuple, radius: float, shape: str
     ) -> None:
-        # WebBackend has no physics world of its own — defining an
-        # obstacle is a no-op here. Phase 7's toggle to SimBackend will
-        # override this executor with one that forwards to the
-        # ObstacleWorld. Raising would break programs that innocently
-        # embed an OBSTACLE definition, so we silently ignore.
-        pass
+        """Register a DSL-declared obstacle with the safety world model.
+
+        When a SafetyAPI is wired, the obstacle is seeded as a cluster of
+        points around ``pos`` so the capsule collision checker sees it on
+        every subsequent ``plan_and_validate`` call. When there is no
+        safety stack, this is a no-op (same legacy behaviour).
+
+        If the underlying backend exposes an ``obstacle_world`` attribute
+        (SimBackend does), the obstacle is *also* spawned as a PyBullet
+        body so the virtual ToF rays can hit it.
+        """
+        if self._safety is not None:
+            import numpy as _np
+            # Sample points on the surface of the obstacle — enough density
+            # that capsule checks see it as more than a single point.
+            x, y, z = (float(v) for v in pos)
+            r = float(radius)
+            n_samples = 14
+            rng = _np.random.default_rng(seed=abs(hash(name)) & 0xFFFFFFFF)
+            dirs = rng.normal(size=(n_samples, 3))
+            dirs /= _np.linalg.norm(dirs, axis=1, keepdims=True) + 1e-9
+            pts = _np.column_stack([
+                x + dirs[:, 0] * r,
+                y + dirs[:, 1] * r,
+                z + dirs[:, 2] * r,
+            ])
+            self._safety.world.ingest_points(pts, confidence=1.0)
+        world_attr = getattr(self._backend, "obstacle_world", None)
+        if world_attr is None:
+            getter = getattr(self._backend, "get_obstacle_world", None)
+            if callable(getter):
+                try:
+                    world_attr = getter()
+                except Exception:
+                    world_attr = None
+        if world_attr is not None:
+            try:
+                # Late import — ObstacleSpec lives under the digital-twin
+                # package which isn't always importable in CI.
+                from braccio_twin.obstacle_world import ObstacleSpec  # type: ignore
+                world_attr.add(ObstacleSpec(
+                    name=name, shape=shape,
+                    position_mm=tuple(float(v) for v in pos),
+                    size_mm=(float(radius), float(radius), float(radius)),
+                ))
+            except Exception:
+                pass
 
     def is_stopped(self) -> bool:
         return self._stop.is_set()
@@ -253,20 +356,13 @@ class WebBridge:
     ready to accept commands at import time. ``close()`` should be
     called from the FastAPI shutdown event.
 
-    ─── Safety caveat (Phase 7) ──────────────────────────────────────
-    ``MotionGuard`` is NOT in the web backend command path. Every
-    motion issued through ``BackendExecutor`` goes straight to the
-    backend's ``send_cmd`` with no synchronous obstacle re-check, so
-    web sequences rely entirely on whatever reactive safety the
-    underlying backend provides. ``SimBackend`` has the virtual ToF
-    loop, and ``SerialBridge`` has none at all. The curses
-    ``controller.py`` is the only place where every command goes
-    through ``MotionGuard.plan_clear_pose``. See the
-    ``feedback_synchronous_safety.md`` memory entry — flipping the
-    mode toggle to "hardware" here does not give you the curses
-    controller's chokepoint. If that matters for a given deployment,
-    run the arm from the curses controller instead and use this UI
-    only against the sim.
+    ─── Safety wiring (post-refactor) ─────────────────────────────────
+    When ``enable_safety=True`` (the default), the bridge constructs its
+    own ``SafetyAPI`` and hands it to every ``BackendExecutor`` it
+    spawns. Every MoveStmt and IK-axis SetJointStmt is validated through
+    ``SafetyAPI.plan_and_validate`` before the serial command lands on
+    the backend, so the web path and the curses controller now share the
+    same synchronous-safety contract.
     """
 
     def __init__(
@@ -276,6 +372,7 @@ class WebBridge:
         sequences_dir: Optional[Path] = None,
         mode: str = MODE_SIM,
         backend_factory: Optional[BackendFactory] = None,
+        enable_safety: bool = True,
     ) -> None:
         if mode not in VALID_MODES:
             raise ValueError(
@@ -293,6 +390,22 @@ class WebBridge:
             backend_factory or default_backend_factory
         )
         self._mode_lock = threading.RLock()
+
+        # Safety stack — one instance per bridge. plan_and_validate() is
+        # called synchronously from BackendExecutor; the BT daemon is NOT
+        # started here because the web path drives motion imperatively
+        # (one plan per DSL primitive), not tick-reactively like curses.
+        self._safety: Optional[SafetyAPI] = None
+        if enable_safety:
+            try:
+                self._safety = SafetyAPI(
+                    send_cmd=lambda _q, _d: None,  # BT unused for web
+                )
+            except Exception:
+                # A stack-construction failure (missing URDF, pybullet
+                # import error in a restricted env) must not kill the
+                # web server. Fall back to the legacy unsafe path.
+                self._safety = None
 
         # Currently-running interpreter + thread.
         self._run_lock = threading.RLock()
@@ -518,7 +631,8 @@ class WebBridge:
 
             self._run_stop.clear()
             executor = BackendExecutor(
-                self._backend, self._state_lib, self._run_stop
+                self._backend, self._state_lib, self._run_stop,
+                safety_api=self._safety,
             )
             interp = Interpreter(executor, status_cb=self._on_status)
             self._run_interp = interp

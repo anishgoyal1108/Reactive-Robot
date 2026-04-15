@@ -1,7 +1,7 @@
 # Reactive Robot: An Autonomous Obstacle-Avoiding Robotic Arm with Real-Time Trajectory Replanning
 
 <p align="center">
-  <img src="assets/braccio_render.png" alt="Braccio V2 digital twin render" width="600">
+  <img src="https://github.com/anishgoyal1108/Reactive-Robot/blob/main/assets/braccio-render.png?raw=true" alt="Braccio V2 digital twin render" width="600">
 </p>
 
 <p align="center">

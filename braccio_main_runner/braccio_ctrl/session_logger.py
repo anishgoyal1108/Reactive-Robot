@@ -134,15 +134,21 @@ class SessionLogger:
         # Data sources (set via set_sources)
         self._arm_state = None
         self._tof_state = None
-        self._sweeper = None
+        self._safety = None
 
     # ── Configuration ─────────────────────────────────────────────────────
 
-    def set_sources(self, arm_state, tof_state, sweeper) -> None:
-        """Attach the shared-state objects the logger samples from."""
+    def set_sources(self, arm_state, tof_state, safety=None, **_legacy) -> None:
+        """Attach the shared-state objects the logger samples from.
+
+        ``safety`` replaces the legacy ``sweeper=`` argument — sweep /
+        obstacle fields in each JSONL sample are now derived from the BT's
+        snapshot. ``**_legacy`` swallows the old ``sweeper=`` kwarg so callers
+        mid-migration don't crash.
+        """
         self._arm_state = arm_state
         self._tof_state = tof_state
-        self._sweeper = sweeper
+        self._safety = safety
 
     @property
     def path(self) -> str:
@@ -245,14 +251,14 @@ class SessionLogger:
     def _emit_sample(self) -> None:
         arm = self._arm_state
         tof = self._tof_state
-        sweeper = self._sweeper
+        safety = self._safety
         if arm is None or tof is None:
             return
 
         now = time.time()
         arm_snap = arm.snapshot()
         tof_snap = tof.snapshot()
-        sweep_snap = sweeper.get_status() if sweeper is not None else {}
+        safety_snap = safety.snapshot() if safety is not None else {}
 
         # Drain pending events
         with self._event_lock:
@@ -266,6 +272,7 @@ class SessionLogger:
         if not isinstance(thresholds, list):
             thresholds = [thresholds] * len(grids)
 
+        world = safety_snap.get("world", {}) or {}
         sample = {
             "t": round(now, 3),
             "t_rel": round(now - self._t0, 3),
@@ -290,14 +297,26 @@ class SessionLogger:
                 "source": arm_snap.get("obstacle_source", ""),
                 "dist_mm": float(arm_snap.get("obstacle_dist_mm", -1.0)),
             },
+            # New BT-derived fields.
+            "bt": {
+                "mode": safety_snap.get("mode", "idle"),
+                "state": safety_snap.get("bt_state", ""),
+                "emergency": bool(safety_snap.get("emergency", False)),
+                "last_strategy": safety_snap.get("last_strategy", ""),
+                "last_failure": safety_snap.get("last_failure"),
+                "polar_blocked": safety_snap.get("polar_blocked", []),
+                "queue_length": int(safety_snap.get("queue_length", 0)),
+            },
+            "world": {
+                "num_points": int(world.get("num_points", 0)),
+                "oldest_age_s": float(world.get("oldest_age_s", 0.0)),
+                "grid_cells_occ": int(world.get("grid_cells_occ", 0)),
+                "grid_cells_free": int(world.get("grid_cells_free", 0)),
+            },
             "sweep": {
-                "running": bool(sweep_snap.get("running", False)),
-                "state": sweep_snap.get("sweep_state", ""),
-                "direction": sweep_snap.get("direction", 0),
-                "current_theta": sweep_snap.get("current_theta", None),
-                "sweep_r": sweep_snap.get("sweep_r", None),
-                "sweep_z": sweep_snap.get("sweep_z", None),
-                "bypass_theta": sweep_snap.get("bypass_theta", None),
+                "running": safety_snap.get("mode") == "sweep",
+                "direction": int(safety_snap.get("sweep_direction", +1)),
+                "target_theta": float(safety_snap.get("sweep_target_deg", 90.0)),
             },
             "arm_io": {
                 "last_cmd": arm_snap.get("last_cmd", ""),

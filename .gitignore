@@ -12,4 +12,4 @@ web/frontend/node_modules/
 web/frontend/dist/
 web/frontend/.vite/
 web/frontend/*.tsbuildinfo
-
+docs/

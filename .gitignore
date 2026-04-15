@@ -13,3 +13,9 @@ web/frontend/dist/
 web/frontend/.vite/
 web/frontend/*.tsbuildinfo
 docs/
+
+# Editor / AI assistant config — not part of the project
+.claude/
+
+# Scratch planning docs
+braccio_main_runner/docs/ROBOTIC_ARM_SENSOR_PLAN.md

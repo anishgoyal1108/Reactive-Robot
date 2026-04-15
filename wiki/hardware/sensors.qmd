@@ -1,0 +1,57 @@
+---
+title: "Sensors & Channel Authority"
+---
+
+## ToF channels
+
+Four VL53L5CX sensors mount on the arm. Each returns an 8x8 distance grid at up to 15 Hz. The `safety/` stack treats channels as one of three authorities:
+
+| Channel | Location | Authority | Rationale |
+|---------|----------|-----------|-----------|
+| CH0 | Front / side | Primary | Faces the sweep direction. Gates replans and blocks manual input when a valid near-return appears. |
+| CH1 | Back / side | Primary | Covers the opposite side of the sweep. Same gating as CH0. |
+| CH2 | Top / side | Primary | Promoted from advisory on 2026-04-10 after a hardware test: a user held a hand close to the sensor and the arm continued to sweep through it because CH2 was classified as advisory. Every working ToF channel now holds replan authority by default. |
+| CH3 | Bottom | Ignored | Points at the floor. Near-returns are dominated by ground reflections and produce constant false positives. |
+
+The rule is encoded in `braccio_main_runner/braccio_ctrl/constants.py`:
+
+```python
+SENSOR_REPLAN_CHANNELS   = [0, 1, 2]
+SENSOR_ADVISORY_CHANNELS = []
+SENSOR_IGNORE_CHANNELS   = [3]
+```
+
+## Per-channel distance thresholds
+
+```python
+TOF_THRESHOLDS_MM = [250.0, 250.0, 250.0, 50.0]
+```
+
+A channel reports an obstacle response when any pixel in the 8x8 grid has a valid target return closer than the threshold. CH3's 50 mm threshold is effectively unreachable from the arm's normal envelope, matching the "ignore" classification above.
+
+## ToF frame format
+
+The Teensy publishes each frame as:
+
+```
+TF,<seq>,<ms>,S<ch>,<ch>,<joint>,<status>,<rows>,<cols>,<d0..dN>,<v0..vN>
+```
+
+`<status>` is the VL53L5CX target_status code. `<d0..dN>` are 64 distances in millimetres; `<v0..vN>` are 64 validity flags. The `tof_sensor.ToFBridge` parser validates each pixel by status code and exposes a `diag_masked_cells` field so the safety stack can distinguish genuine near-returns from occluded pixels.
+
+## IR severity encoding
+
+Four IR sensors each produce a binary signal. A count of firing sensors maps to severity:
+
+| Firing sensors | Severity | Label |
+|-----:|------|-------|
+| 0 | 0 | CLEAR |
+| 1 | 1 | FAR |
+| 2 | 2 | CLOSE |
+| 3+ | 3 | DANGER |
+
+The firmware sends the severity directly as `IR,<0-3>`. The controller maps severity 2 or higher to a reactive retreat.
+
+## IMU
+
+The MPU-6050 posts roll and pitch from the accelerometer at 10 Hz. Yaw is not fused because the MPU-6050 lacks a magnetometer; absolute heading comes from encoder feedback on the base servo. The IMU's rotation matrix is cached in `imu_state.py` and invalidated only when roll, pitch, or the user-calibrated yaw reference changes.

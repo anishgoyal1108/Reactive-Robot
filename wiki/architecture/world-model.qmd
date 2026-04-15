@@ -1,0 +1,33 @@
+---
+title: "World Model"
+---
+
+## Representation
+
+`safety.world_model.WorldModel` holds three shared data structures:
+
+1. **Timestamped point cloud.** Every ToF pixel that passes validation lands as a 4-tuple `(x, y, z, t_ns)` in the world frame. Points older than `OBS_MEM_TTL_SEC` are evicted on each tick.
+2. **KDTree.** A scipy `cKDTree` built over the current cloud. Rebuilt at 10 Hz on a background thread; collision queries between rebuilds use the last-built tree plus a small buffer of newly-added points.
+3. **Log-odds occupancy grid.** A voxelised coarse view of the world, `OBS_MEM_CELL_MM` (40 mm) per cell. Each cell accumulates evidence on observation and decays at `OBS_MEM_DECAY_PER_SEC`. Cells above `OBS_MEM_OCCUPIED_THRESHOLD` count as occupied for polar-map and sweep-skip logic.
+
+The three structures exist in parallel because they answer different questions. The cloud answers "what is the nearest surface to this capsule?" The KDTree answers it efficiently. The grid answers "should the sweep skip this angular window entirely?" with a constant-time lookup.
+
+## Frame fusion
+
+The IMU's cached rotation matrix is the glue that moves ToF pixels from sensor-local coordinates into the world frame. Every ToF pixel is transformed as:
+
+```
+p_world = R_imu @ R_link(joint_angles) @ p_local + t_sensor
+```
+
+where `R_imu` comes from `imu_state.rotation_matrix()`, `R_link` is the forward-kinematics output of the link the sensor is mounted on, and `t_sensor` is the sensor's offset in the link frame.
+
+If the IMU has not published a frame yet, `imu_state.wait_for_frame()` blocks the caller. The controller calls this at startup so the first ToF frame never lands with an identity rotation matrix.
+
+## Thread safety
+
+`WorldModel` guards its internal state with a single `RLock`. Writers (the sensor ingest thread and the KDTree rebuild thread) take the lock for milliseconds at a time; readers (the collision checker, invoked during planning) take the lock for a few microseconds per query. The planner tolerates a stale KDTree for a few frames because the dirty-point buffer covers the gap.
+
+## Persistence
+
+The grid is not persisted across controller restarts. IMU recalibration via the `C` key clears both the cloud and the grid, since any recalibration invalidates the rotation matrix that tied ToF pixels to world coordinates.

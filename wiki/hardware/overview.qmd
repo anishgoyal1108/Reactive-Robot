@@ -1,0 +1,38 @@
+---
+title: "Hardware Overview"
+---
+
+## Bill of materials
+
+| Component | Detail |
+|-----------|--------|
+| Arm | Braccio V2, 6-DOF: base, shoulder, elbow, wrist-vertical, wrist-rotation, gripper |
+| Arm controller | Arduino Mega running stock Braccio firmware at `/dev/ttyACM0` |
+| Sensor controller | Teensy 4.1 at `/dev/ttyACM1` |
+| ToF | 4 x VL53L5CX on a TCA9548A I2C mux, 8x8 distance grid per sensor |
+| IR | 4 x EC-Buying IR obstacle sensors, active-LOW at 5 V, through a TI SN74LVC02A NOR-inverter stage to 3.3 V active-HIGH on Teensy pins 23, 22, 21, 20 |
+| IMU | MPU-6050 on the Teensy, accelerometer-derived roll and pitch |
+
+## Serial wiring
+
+The two microcontrollers each present a USB-CDC endpoint. The controller opens both at 115200 baud:
+
+```
+Host ── USB ──> Arduino Mega (/dev/ttyACM0)  ── PWM ──> Braccio servos
+Host ── USB ──> Teensy 4.1    (/dev/ttyACM1) ── I2C ──> TCA9548A mux ── 4x VL53L5CX
+                                              ── GPIO ──> 4x IR via NOR inverter
+                                              ── I2C ──> MPU-6050
+```
+
+## Coordinate frame
+
+The world frame sits at the arm base and shoulder pivot:
+
+- `+X` points forward at theta 0°.
+- `+Y` points left at theta 90°.
+- `+Z` points upward.
+- `theta` is the base rotation angle in degrees, 0 to 180.
+- `r` is the radial reach in millimetres.
+- `z` is the height above the shoulder pivot in millimetres.
+
+The safety stack, the IK solver, and the UDP telemetry packets share this frame, so any sensor reading posted in world-frame coordinates plugs straight into the collision checker.

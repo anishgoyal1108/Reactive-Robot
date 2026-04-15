@@ -1,0 +1,71 @@
+/* Reactive Robot wiki — layout polish on top of cosmo. */
+
+.navbar-brand {
+  font-weight: 600;
+}
+
+.hero {
+  padding: 48px 0 32px;
+  text-align: center;
+}
+
+.hero h1 {
+  margin: 0 0 8px;
+  font-size: 2.25rem;
+}
+
+.hero p.lead {
+  margin: 0 auto;
+  max-width: 640px;
+  color: #5a6572;
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+  margin: 24px 0;
+}
+
+.card-grid a.card {
+  display: block;
+  padding: 16px;
+  border: 1px solid #e6e9ed;
+  border-radius: 8px;
+  background: #fff;
+  color: inherit;
+  text-decoration: none;
+  transition: box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.card-grid a.card:hover {
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.06);
+  transform: translateY(-2px);
+}
+
+.card h3 {
+  margin: 0 0 6px;
+  font-size: 1.05rem;
+}
+
+.card p {
+  margin: 0;
+  color: #5a6572;
+  font-size: 0.92rem;
+}
+
+/* Tight tables for protocol / command references. */
+table.syntax {
+  font-size: 0.92rem;
+}
+
+table.syntax th {
+  text-align: left;
+  background: #f7f9fc;
+}
+
+table.syntax td code,
+table.syntax th code {
+  background: transparent;
+  padding: 0;
+}

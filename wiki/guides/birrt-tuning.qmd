@@ -1,0 +1,42 @@
+---
+title: "BiRRT Planner Tuning"
+---
+
+`SafetyPlanner` (`braccio_main_runner/braccio_ctrl/safety/planner.py`) wraps `pybullet_planning.birrt` and adds post-smoothing. The planner has four knobs worth understanding before you change them.
+
+## Sampling bounds
+
+The planner samples joint-space configurations uniformly within the joint limits parsed from `braccio.urdf`. Gripper motion is excluded from the sampled dimensions because the gripper position does not affect collision geometry; the planner plans for five joints and applies the gripper target as a trailing step.
+
+## Distance metric
+
+The default distance function weights joint deltas by link length so a degree change at the base (longer lever arm) costs more than a degree change at the wrist. This keeps BiRRT exploring configurations whose end-effector positions are evenly spaced rather than clustering in wrist space.
+
+If you retune weights, keep the base/shoulder pair at least 3x heavier than the wrist pair. Otherwise the planner finds "clever" wrist-twisting paths that the operator experiences as unpredictable motion.
+
+## Extend step
+
+The extend step is the joint-space distance BiRRT tries to cover on each tree-growth iteration. Too small and the tree grows slowly; too large and the collision checker misses thin obstacles between samples.
+
+The default matches the collision checker's `n_samples` budget so every extension is checked at a density that catches a 40 mm obstacle anywhere along the step. If you change `SWEEP_COLLISION_RADIUS_MM`, re-derive this value.
+
+## Timeout budget
+
+`SafetyPlanner` enforces a 2-second wall-clock budget per plan attempt. The cascading replanner makes up to six attempts before aborting, so a single command can spend up to ~12 seconds in planning under worst-case conditions.
+
+A tighter budget means more aborts in cluttered scenes. A looser budget delays the operator's feedback loop. 2 seconds is the value the capstone settled on after running 500 scripted scenes through both cluttered-workspace and sparse-workspace benchmarks.
+
+## Smoothing
+
+After BiRRT returns, the planner runs shortcut smoothing: repeatedly pick two random waypoints and try to replace the segment between them with a straight joint-space line, keeping the replacement if it collision-checks clean.
+
+Smoothing runs for 50 iterations by default. Past ~100 iterations the marginal improvement is under 1% on representative paths. Past ~500 iterations smoothing introduces numerical artefacts where a straight line through two "almost" collision-free configurations lands right at the capsule boundary.
+
+## Failure modes
+
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| Planner always aborts in a clear workspace | KDTree stale or world-frame transform wrong | Run `python -m braccio_twin.smoke_test` to check sensor-to-world transforms. |
+| Paths are jerky | Smoothing disabled or iterations too low | Raise `smoothing_iters` to 50 or higher. |
+| Paths clip obstacles the operator sees | Collision checker clearance too small or extend step too large | Raise `clearance_mm` by 10 mm. If that hides the symptom, your extend step is the real problem. |
+| Plans take longer than 2 s consistently | Goal is outside the reachable envelope | Verify reachability via `ik_solver.reachable(theta, r, z)` before calling the planner. |

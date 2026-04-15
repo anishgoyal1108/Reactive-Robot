@@ -1,0 +1,39 @@
+---
+title: "Quickstart"
+---
+
+## Run the digital twin in 60 seconds
+
+1. Activate your venv (`source .venv/bin/activate`).
+2. Run `python -m braccio_twin` to bring up the headless PyBullet session.
+3. In a second terminal, start the FastAPI bridge: `uvicorn web.backend.app:app --reload --port 8011`.
+4. In a third terminal, run the frontend dev server: `cd web/frontend && VITE_BACKEND_ORIGIN=http://localhost:8011 npm run dev`.
+5. Open `http://localhost:5173` in your browser. The viewer renders the Braccio and telemetry streams over the WebSocket.
+
+## Run the curses controller against real hardware
+
+1. Connect the Arduino Mega at `/dev/ttyACM0` and the Teensy 4.1 at `/dev/ttyACM1`.
+2. Run `python -m braccio_ctrl /dev/ttyACM0 --teensy-port /dev/ttyACM1`.
+3. Press `H` to home the arm, `Z` to toggle the autonomous sweep, or `M` to open the saved-states menu.
+4. Press `ESC` to quit.
+
+The `safety/` stack is always on; every manual keypress routes through `SafetyAPI.plan_and_validate` before the servos move.
+
+## Edit a sequence in the curses editor
+
+1. Save a named pose. With the arm in position, press `M` to open the states menu, press `n` to add a new state, type a name, and confirm.
+2. Press `F4` (or whatever the current binding is in the controller help bar) to open the sequence editor.
+3. Write DSL text. See the [command reference](../dsl/commands.qmd) for syntax.
+4. Press `F5` to run. Errors appear in red; the status bar shows `● RUNNING step N/M pass P/Q` while execution is in progress.
+5. Press `F6` to stop.
+
+## Build the SPA for GitHub Pages
+
+The frontend ships a demo mode that replaces the Run button with a Copy-DSL button and routes every backend call through a localStorage-backed mock. Build with:
+
+```bash
+cd web/frontend
+VITE_BASE=/Reactive-Robot/editor/ VITE_DEMO_MODE=true npm run build
+```
+
+The `dist/` directory is the artifact the Pages workflow uploads.

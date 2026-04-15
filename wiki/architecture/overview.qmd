@@ -1,0 +1,54 @@
+---
+title: "Architecture Overview"
+---
+
+## The pipeline
+
+Every motion request, from a single keypress in the curses controller to a full DSL sequence launched from the browser, flows through the same seven-step pipeline.
+
+1. **Sensor ingestion.** `tof_sensor.py` parses Teensy serial frames (`TF,...`, `IR,...`, `IMU,...`) on a daemon thread and pushes each frame into the world model.
+2. **World model.** `safety.world_model.WorldModel` maintains a timestamped point cloud, a KDTree for nearest-neighbour queries, and a coarse log-odds occupancy grid. Cells decay over time so stale returns age out.
+3. **Behavior tree.** `safety.behavior` routes requests by mode (manual, sweep, sequence) via a py-trees root. Each mode shares the same planner and collision checker.
+4. **Planner.** `safety.planner.SafetyPlanner` runs BiRRT through `pybullet_planning.birrt` and smooths the result. Every interpolated waypoint goes through `safety.collision` for capsule-to-point-cloud distance checks.
+5. **Replanner.** `safety.replanner.CascadingReplanner` applies six recovery strategies in order when a segment fails: micro-retreat, sweep-side flip, Z-axis shift, nearest-waypoint restart, reachability-relaxed IK, and a final abort.
+6. **Actuation.** `serial_bridge.py` writes `SET ALL B<deg> S<deg> E<deg> WV<deg> WR<deg> G<deg>\n` commands to the Arduino and reads back `POS` responses.
+7. **Telemetry.** `session_logger.py` emits 10 Hz JSONL frames for post-run analysis; `data_publisher.py` streams UDP packets to `arm_plotter_app.py` and `tof_plotter_app.py`.
+
+## Guarantees
+
+The design rests on three invariants that every contributor should preserve:
+
+- **Chokepoint.** Every motion request routes through `SafetyAPI.plan_and_validate`, `queue_manual_intent`, or `queue_sequence`. Bypassing the API to talk to the serial bridge directly is not allowed.
+- **Synchronous checks.** Collision checks run against the *live* point cloud, not a cached snapshot. Caching was a real source of stale-avoidance bugs in the pre-2026-04-13 motion_guard stack; the new architecture fixed that by gating every command at the moment of dispatch.
+- **Conservative defaults.** Every working ToF channel starts at REPLAN authority. Demotions require evidence of a false-positive pattern, not a geometry assumption.
+
+## Module layout
+
+```
+braccio_main_runner/braccio_ctrl/
+├── __main__.py           # Argparse CLI
+├── controller.py         # Curses TUI
+├── arm_state.py          # Joint state + IK helpers
+├── serial_bridge.py      # Arduino driver
+├── tof_sensor.py         # Teensy frame parser
+├── imu_state.py          # IMU state + rotation matrix cache
+├── backends.py           # BraccioBackend Protocol
+├── constants.py          # All tunable parameters
+├── session_logger.py     # 10 Hz JSONL trace
+├── data_publisher.py     # UDP telemetry
+├── dsl/                  # Lark-based sequence DSL
+└── safety/
+    ├── api.py            # SafetyAPI chokepoint
+    ├── behavior.py       # py-trees behavior tree
+    ├── world_model.py    # Point cloud + KDTree + log-odds
+    ├── fk.py             # Headless PyBullet forward kinematics
+    ├── collision.py      # Capsule-to-point distance
+    ├── planner.py        # BiRRT wrapper
+    ├── replanner.py      # Six-strategy recovery
+    ├── polar_map.py      # 1D angular map for sweep skip-ahead
+    ├── pre_scan.py       # Wrist-sweep workspace observation
+    ├── hysteresis.py     # Schmitt trigger / EMA / rate clamp
+    └── dialog.py         # Curses refusal overlay
+```
+
+The `braccio_twin/` package mirrors this layout in simulation: `SimBackend` implements the `BraccioBackend` Protocol, and `virtual_tof.py`, `virtual_ir.py`, and `virtual_imu.py` emulate the Teensy's sensor output well enough that the same safety stack runs end-to-end in PyBullet with no hardware attached.

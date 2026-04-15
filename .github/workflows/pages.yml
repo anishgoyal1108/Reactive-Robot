@@ -1,0 +1,144 @@
+name: Deploy Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  test-python:
+    name: Python tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            braccio_main_runner/requirements.txt
+            requirements-dev.txt
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r braccio_main_runner/requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run pytest
+        working-directory: braccio_main_runner
+        run: pytest tests
+
+  test-frontend:
+    name: Frontend tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/frontend/package-lock.json
+
+      - name: Install frontend deps
+        working-directory: web/frontend
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: web/frontend
+        run: npm run typecheck
+
+      - name: Run vitest
+        working-directory: web/frontend
+        run: npm test
+
+  build:
+    name: Build wiki + editor
+    needs: [test-python, test-frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            braccio_main_runner/requirements.txt
+            requirements-dev.txt
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r braccio_main_runner/requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/frontend/package-lock.json
+
+      - name: Install frontend deps
+        working-directory: web/frontend
+        run: npm ci
+
+      - name: Set up Quarto
+        uses: quarto-dev/quarto-actions/setup@v2
+
+      - name: Build frontend (demo mode)
+        working-directory: web/frontend
+        env:
+          VITE_BASE: /Reactive-Robot/editor/
+          VITE_DEMO_MODE: "true"
+        run: npm run build
+
+      - name: Generate Python API reference
+        working-directory: wiki
+        env:
+          PYTHONPATH: ${{ github.workspace }}/braccio_main_runner:${{ github.workspace }}
+        run: python -m quartodoc build
+
+      - name: Render Quarto
+        working-directory: wiki
+        run: quarto render
+
+      - name: Stage editor bundle
+        run: |
+          mkdir -p wiki/_site/editor
+          cp -r web/frontend/dist/* wiki/_site/editor/
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: wiki/_site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

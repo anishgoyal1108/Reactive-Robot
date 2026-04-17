@@ -113,7 +113,10 @@ TOF_BAUD_RATE       = 115200
 # the user's hand held next to CH2 produced readings in the 41-100mm band,
 # most of which were silently filtered out. Matching CH0/CH1 at 250mm catches
 # the full detection range and still leaves ~98% of idle frames above threshold.
-TOF_THRESHOLDS_MM   = [100.0, 100.0, 100.0, 50.0]
+# 2026-04-17: CH1/CH2 bumped 100→250 (accuracy over speed) — at 100 mm the
+# sides were reacting too late and producing the escape_collision jitter in
+# session_20260417_014307.
+TOF_THRESHOLDS_MM   = [100.0, 250.0, 250.0, 50.0]
 TOF_THRESHOLD_MM    = TOF_THRESHOLDS_MM[0]   # legacy fallback alias
 TOF_UPSAMPLE_N     = 40       # bilinear upsample resolution for plotting
 TOF_SURFACE_EVERY  = 5        # redraw 3D surface every N frames (performance)
@@ -144,17 +147,23 @@ OBSTACLE_HOLD_S            = 0.5
 # document.
 #
 # ToF hysteresis — Schmitt trigger engage / disengage (§7). Per-channel
-# deadband. CH0 (front) keeps the generous 250/350 window because it's the
-# authoritative "obstacle ahead of the sweep direction" channel. CH1/CH2
-# are the side-facing sensors; the 250 mm window was pulling in the arm's
-# own structure and the hardware rig, so we use a tighter 100/180 window.
-# CH3 is ignored (ground).
-TOF_ENGAGE_MM            = [100.0, 100.0, 100.0,  50.0]
-TOF_DISENGAGE_MM         = [180.0, 180.0, 180.0, 100.0]
+# deadband. CH0 (front) uses a 100/180 window tight enough to avoid
+# false-positives on the arm's own structure. CH1/CH2 (side-facing) were
+# bumped 100/180 → 250/350 on 2026-04-17 after session_20260417_014307 showed
+# the sides reacting too late, producing escape_collision jitter. CH3 is
+# ignored (ground).
+TOF_ENGAGE_MM            = [100.0, 250.0, 250.0,  50.0]
+TOF_DISENGAGE_MM         = [180.0, 350.0, 350.0, 100.0]
 
 # Joint command smoothing — EMA α (§7, DeXtreme default).
-JOINT_COMMAND_EMA_ALPHA  = 0.2
-# Backstop rate clamp applied after EMA (deg per BT tick).
+# Lowered 0.2 → 0.15 on 2026-04-17 for a smoother spline (accuracy over
+# speed); more lag, less per-tick chatter.
+JOINT_COMMAND_EMA_ALPHA  = 0.15
+# Backstop rate clamp applied after EMA (deg per BT tick). Set to match
+# SWEEP_STEP_DEG so normal sweep motion runs at full speed while big replan
+# jumps (escape_collision hit 49° in a single 100 ms tick in
+# session_20260417_014307) get spread over many ticks — this is the
+# "replanning window" that makes corrective motion smooth.
 JOINT_RATE_MAX_DEG       = 5.0
 
 # Capsule clearance — margin added to each link's capsule radius before the
@@ -164,8 +173,25 @@ CAPSULE_CLEARANCE_MM     = 30.0
 
 # Projected ToF points closer than (capsule_radius + this) to any arm link
 # are dropped at ingest — prevents the arm's own structure from being logged
-# as a permanent obstacle that deadlocks the planner.
-TOF_SELF_FILTER_MARGIN_MM = 40.0
+# as a permanent obstacle that deadlocks the planner. Kept small (5 mm) so
+# real obstacles just outside the arm surface (e.g. a finger 20–30 mm from
+# the wrist) aren't filtered as self-reflections; the old 40 mm margin was
+# eating every close reading the ToF sensors produced.
+TOF_SELF_FILTER_MARGIN_MM = 5.0
+
+# Per-channel self-filter margin overrides. CH3 (bottom sensor) sits
+# above the TCA9548A MUX breakout board; when the wrist tilts forward
+# past ~30° the bottom sensor starts seeing the MUX/PCB/wiring at
+# ~40-80 mm and mis-reads those returns as obstacles, which drives the
+# BT into permanent escape_collision + edge_reverse ping-pong. Widen
+# CH3's margin so the mount-block volume gets filtered as "self", not
+# "obstacle". CH0/CH1/CH2 keep the tight default margin.
+TOF_SELF_FILTER_MARGIN_PER_CHANNEL_MM: tuple[float, float, float, float] = (
+    5.0,   # CH0 top    — open sky
+    5.0,   # CH1 right  — side
+    5.0,   # CH2 left   — side
+    90.0,  # CH3 bottom — sees MUX board + PCB + wiring on tilt
+)
 
 # Physical MUX channel → software channel remap. The Teensy firmware
 # selects TCA9548A channels 0-3 in hardware order and labels them S0-S3
@@ -208,10 +234,37 @@ BIRRT_EXTEND_DEG         = 5.0
 WORLD_MAX_AGE_S          = 15.0
 WORLD_KDTREE_REBUILD_S   = 0.5
 
+# ── Simple replan sweep (demo-safe mode) ─────────────────────────────────
+# When True, the sweep branch uses a minimal reactive state machine: on a
+# ToF hit, parametrise a smooth radial-pullback detour from current θ to
+# the first clear θ past the obstacle (same z-line, same direction) and
+# stream it one waypoint per BT tick. Only reverses direction when the
+# clear-side θ would fall outside the [0, 180] sweep domain. Set False to
+# re-enable the full escalation ladder (polar skip → z-ladder → BiRRT →
+# direction flip).
+SIMPLE_REPLAN_MODE       = True
+# Back-compat alias — older tests and session logs reference the prior
+# name. Kept as an alias so a flip of SIMPLE_REPLAN_MODE also flips the
+# legacy reads; monkeypatching either one in tests still works because the
+# sweep branch reads SIMPLE_REPLAN_MODE via ``getattr(_c, ...)`` at runtime.
+SIMPLE_SWEEP_MODE        = SIMPLE_REPLAN_MODE
+# Cool-down after a reactive reverse before the sweep allows another
+# direction flip. Prevents jitter when a sensor straddles its threshold.
+SIMPLE_SWEEP_REVERSE_COOLDOWN_S = 0.4
+
+# Angular-detour shape knobs (see _SweepTick._build_detour_path). The
+# detour is a smoothstep in θ with a sine-shaped radial dip at midpoint
+# so the arm curves AROUND an obstacle while keeping z on the sweep's
+# z-line.
+SWEEP_DETOUR_STEPS       = 6        # waypoints per detour (rate-clamp fills in)
+SWEEP_DETOUR_R_DIP_MM    = 40.0     # nominal radial pull-in at midpoint
+SWEEP_DETOUR_R_MIN_MM    = 60.0     # IK inner-cone guard; pull-in cannot go below this
+SWEEP_DETOUR_CHAIN_MAX   = 3        # adjacent-block chain-skip iterations
+
 # Sweep configuration (§7).
 SWEEP_R_DEFAULT_MM       = 152.0
 SWEEP_Z_DEFAULT_MM       = 35.0
-SWEEP_STEP_DEG           = 5.0     # was 2.0 — sweeps the full 0→180 range noticeably faster
+SWEEP_STEP_DEG           = 5.0     # full-speed sweep — smoothness comes from the RateClamp in SafetyAPI._handle_command, not from throttling the step
 SWEEP_PRE_SCAN_WAYPOINTS = 5
 SWEEP_SKIP_MARGIN_DEG    = 10.0
 SWEEP_FOV_HALF_DEG       = 22.5    # VL53L5CX per-axis FoV half-angle
@@ -223,9 +276,10 @@ SWEEP_Z_LADDER_MM        = [35.0, 60.0, 90.0, 10.0, -20.0]
 # Sequence replanner (§6).
 SEQUENCE_MAX_RETRIES     = 3
 
-# Behavior tree tick rate. Bumped from 10 → 20 so sweep + manual-hold feel
-# responsive; each plan is still <50 ms on commodity CPUs so the tick
-# budget is comfortable.
+# Behavior tree tick rate. 20 Hz keeps sweep + manual-hold responsive; each
+# plan is still <50 ms on commodity CPUs so the tick budget is comfortable.
+# Per-tick smoothness is enforced by the RateClamp in the command path, not
+# by lowering the tick rate (lower tick rate made the sweep feel sluggish).
 BT_TICK_HZ               = 20.0
 
 # ── User experience toggles ───────────────────────────────────────────────

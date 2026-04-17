@@ -551,12 +551,19 @@ class BraccioController:
         tof_snap = self._tof_state.snapshot()
         arm_snap = self._state.snapshot()
         joints = list(arm_snap.get("joints", HOME_POS))
-        imu_R = self._imu_state.rotation_matrix()
         thresholds = tof_snap.get("tof_thresholds_mm", TOF_THRESHOLDS_MM)
 
-        # Point cloud ingest
+        # Point cloud ingest — pass imu_R=None so points land in the arm's
+        # base frame, which is the same frame FK / capsule collision / the
+        # self-filter / the sweep's polar query all use. Rotating ToF
+        # points into a gravity-aligned world frame (via imu_R) put the
+        # cloud in a frame none of the downstream safety checks knew
+        # about, so the BT's is_blocked() always said "clear" even when
+        # CH2/CH3 were reporting fingers flush against the sensor. The
+        # IMU calibration stays useful for display / telemetry; it's just
+        # not applied to the obstacle point cloud.
         self._safety.ingest_tof_frame(
-            tof_snap["grids"], joints, imu_R, thresholds,
+            tof_snap["grids"], joints, None, thresholds,
         )
         # Hysteresis feed: per-channel minimum distance within threshold
         dists: list[float] = []

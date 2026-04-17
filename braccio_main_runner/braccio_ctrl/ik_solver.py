@@ -102,13 +102,22 @@ def polar_to_cartesian(theta_deg: float, r_mm: float):
 
 def wrist_level_angle(shoulder_deg: float, elbow_deg: float) -> float:
     """
-    Compute the wrist vertical angle that keeps the gripper horizontal.
+    Compute the wrist vertical angle that keeps the gripper level in the
+    overhand orientation (gripper tip forward-and-up as
+    ``wrist_vert → 180°``).
 
-    Formula: WristV = 180 - Shoulder - Elbow
-    (derived from the constraint that all three link angles sum to 180°
-    for a level end-effector in the vertical plane.)
+    Formula: WristV = Shoulder + Elbow - 180
+
+    Convention flip from the original "180 - Shoulder - Elbow": on the
+    physical Braccio the wrist-vertical servo mounts so that increasing
+    ``wrist_vert`` rotates the gripper upward. The old convention drove
+    the wrist toward 0 as shoulder+elbow grew, which produced the
+    "backwards / under-hand" look the user reported. The flipped form
+    saturates wrist at 180 (overhand) when shoulder and elbow are bent
+    together — matches the intuition "bending the arm in → gripper
+    rotates forward-and-up".
     """
-    angle = 180.0 - shoulder_deg - elbow_deg
+    angle = shoulder_deg + elbow_deg - 180.0
     w_lo, w_hi = JOINT_LIMITS[3]
     return max(w_lo, min(w_hi, angle))
 

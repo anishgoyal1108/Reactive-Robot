@@ -112,6 +112,13 @@ class SafetyPlanner:
         """
         return self._collision
 
+    @property
+    def fk(self) -> ForwardKinematics:
+        """Public accessor for forward kinematics — branches use this to
+        query the arm's actual world-frame pose, which matters when the
+        polar obstacle map needs to know where the wrist *really* is."""
+        return self._fk
+
     # ── Public API ─────────────────────────────────────────────────────────
 
     def plan(

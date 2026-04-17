@@ -114,6 +114,29 @@ def test_polar_ignores_far_slices(world):
     assert ranges == []
 
 
+def test_obstacle_z_extent_captures_tall_column(world):
+    # Vertical column at θ=90°, r=152: points stacked along z from -60 → 90.
+    r = 152.0
+    theta = 90.0
+    x = r * np.cos(np.radians(theta))
+    y = r * np.sin(np.radians(theta))
+    zs = np.linspace(-60.0, 90.0, 16)
+    pts = np.array([[x, y, z] for z in zs])
+    world.ingest_points(pts)
+
+    extent = world.obstacle_z_extent(r_mm=r, theta_deg=theta)
+    assert extent is not None
+    z_min, z_max = extent
+    assert z_min <= -55.0
+    assert z_max >= 85.0
+
+
+def test_obstacle_z_extent_empty_slice_returns_none(world):
+    # Point at theta≈0°; query at theta=180° — opposite side, far outside FoV.
+    world.ingest_points(np.array([[152.0, 0.0, 0.0]]))
+    assert world.obstacle_z_extent(r_mm=152.0, theta_deg=180.0) is None
+
+
 def test_clear_wipes_everything(world):
     world.ingest_points(np.array([[100.0, 0.0, 0.0]]))
     world.mark_observed_free([0.0, 0.0, 0.0], [200.0, 0.0, 0.0])

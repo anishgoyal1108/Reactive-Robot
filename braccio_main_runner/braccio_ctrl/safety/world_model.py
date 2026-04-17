@@ -281,6 +281,41 @@ class WorldModel:
                 merged.append((lo, hi))
         return merged
 
+    def obstacle_z_extent(
+        self,
+        r_mm: float,
+        theta_deg: float,
+        r_tol_mm: float = 80.0,
+        fov_half_deg: float = 22.5,
+    ) -> Optional[tuple[float, float]]:
+        """(z_min, z_max) of obstacle points in the angular slice centred on
+        ``theta_deg`` at radius ``r_mm``. Returns ``None`` when the slice is
+        empty.
+
+        The sweep branch uses this to decide whether an obstacle is tall /
+        vertical (spans most of the Z-ladder) — in which case climbing or
+        descending the ladder can't overtake it — and to pick the ladder
+        rung on the safe side of the obstacle when it isn't.
+        """
+        with self._lock:
+            if self._points.shape[0] == 0:
+                return None
+            pts = self._points[:, :3]
+            dx, dy, dz = pts[:, 0], pts[:, 1], pts[:, 2]
+            pr = np.sqrt(dx * dx + dy * dy)
+            thetas = np.degrees(np.arctan2(dy, dx))
+            theta_l = float(theta_deg) - float(fov_half_deg)
+            theta_h = float(theta_deg) + float(fov_half_deg)
+            mask = (
+                (np.abs(pr - r_mm) <= r_tol_mm)
+                & (thetas >= theta_l)
+                & (thetas <= theta_h)
+            )
+            if not np.any(mask):
+                return None
+            zs = dz[mask]
+            return (float(np.min(zs)), float(np.max(zs)))
+
     def snapshot(self) -> dict:
         """Diagnostic summary for the display / session logger."""
         with self._lock:

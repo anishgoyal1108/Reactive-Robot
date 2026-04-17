@@ -51,7 +51,7 @@ from .behavior import (
 )
 from .collision import CollisionChecker, capsule_point_cloud_distance
 from .fk import BRACCIO_JOINT_NAMES, ForwardKinematics
-from .hysteresis import EMA, SchmittTrigger
+from .hysteresis import EMA, RateClamp, SchmittTrigger
 from .planner import PlanResult, SafetyPlanner
 from .polar_map import PolarObstacleMap
 from .pre_scan import PreScanRoutine
@@ -173,6 +173,7 @@ class SafetyAPIConfig:
     tof_disengage_mm: Sequence[float] = field(
         default_factory=lambda: tuple(_c.TOF_DISENGAGE_MM))
     joint_command_ema_alpha: float = _c.JOINT_COMMAND_EMA_ALPHA
+    joint_rate_max_deg: float = _c.JOINT_RATE_MAX_DEG
     capsule_clearance_mm: float = _c.CAPSULE_CLEARANCE_MM
     birrt_timeout_s: float = _c.BIRRT_TIMEOUT_S
     birrt_extend_deg: float = _c.BIRRT_EXTEND_DEG
@@ -185,6 +186,8 @@ class SafetyAPIConfig:
     obstacle_sound_path: str = _c.OBSTACLE_SOUND_PATH
     obstacle_sound_cooldown_s: float = _c.OBSTACLE_SOUND_COOLDOWN_S
     tof_self_filter_margin_mm: float = _c.TOF_SELF_FILTER_MARGIN_MM
+    tof_self_filter_margin_per_channel_mm: tuple[float, ...] = field(
+        default_factory=lambda: tuple(_c.TOF_SELF_FILTER_MARGIN_PER_CHANNEL_MM))
 
 
 class SafetyAPI:
@@ -229,6 +232,9 @@ class SafetyAPI:
             for ch in range(len(self._cfg.tof_engage_mm))
         }
         self.joint_ema = EMA(alpha=self._cfg.joint_command_ema_alpha)
+        self.joint_rate_clamp = RateClamp(
+            max_delta_per_tick=self._cfg.joint_rate_max_deg,
+        )
         self.bb = SafetyBlackboard(name=f"safety_bb_{id(self)}")
         self.bb.current_q = list(self._cfg.home_q)
         self.root = build_root(
@@ -313,21 +319,31 @@ class SafetyAPI:
                 grid, ch, joints, imu_R, threshold_mm=thresholds_mm[ch],
             )
             if pts.shape[0]:
-                pts = self._filter_arm_self_points(pts, joints)
+                pts = self._filter_arm_self_points(pts, joints, ch)
             if pts.shape[0]:
                 self.world.ingest_points(pts)
 
     def _filter_arm_self_points(
         self, pts_world: np.ndarray, joints: list[int],
+        channel: Optional[int] = None,
     ) -> np.ndarray:
         """Drop points that land inside (or very close to) the arm's own
         capsule volume. These are reflections off the arm's own structure
         and would otherwise accumulate as fake obstacles that trap the
         planner with ``start_in_collision``.
+
+        ``channel`` selects a per-channel margin override from the config.
+        CH3 (bottom sensor) needs a wider exclusion than CH0/CH1/CH2
+        because it sits directly above the TCA9548A MUX breakout and
+        sees the board / wiring at close range when the wrist tilts.
         """
         if pts_world.shape[0] == 0:
             return pts_world
-        margin = float(self._cfg.tof_self_filter_margin_mm)
+        per_ch = self._cfg.tof_self_filter_margin_per_channel_mm
+        if channel is not None and 0 <= channel < len(per_ch):
+            margin = float(per_ch[channel])
+        else:
+            margin = float(self._cfg.tof_self_filter_margin_mm)
         try:
             capsules = self.fk.link_endpoints(list(joints))
         except Exception:
@@ -404,8 +420,13 @@ class SafetyAPI:
         self.bb.mode = "idle"
         self.bb.manual_intent = None
         self.bb.sequence_queue = []
-        # Force-send the HOME pose so the arm retreats.
-        self._handle_command({"joints": list(self._cfg.home_q), "delta": 5})
+        # Force-send the HOME pose so the arm retreats. Bypass EMA + rate
+        # clamp so the retreat snaps to HOME in one tick — the whole point
+        # of emergency_stop is to skip every smoothing budget.
+        self._handle_command({
+            "joints": list(self._cfg.home_q), "delta": 5,
+            "bypass_smoothing": True,
+        })
 
     def plan_and_validate(
         self, current_q: list[int], goal_q: list[int],
@@ -488,17 +509,34 @@ class SafetyAPI:
 
     def _handle_command(self, cmd: dict) -> None:
         """Receive a pending_command from the BT and forward to the user's
-        send_cmd callback. EMA-smooths the joint list and rate-clamps
-        shoulder/elbow/wrist deltas."""
+        send_cmd callback. EMA-smooths the joint list then rate-clamps the
+        per-tick joint deltas so big replans (e.g. escape_collision) walk to
+        their target gradually instead of snapping in one tick."""
         joints = list(cmd.get("joints", []))
         delta = int(cmd.get("delta", 3))
+        bypass = bool(cmd.get("bypass_smoothing", False))
         if not joints:
             return
-        try:
-            smoothed = self.joint_ema.update(np.array(joints, dtype=np.float64))
-            smoothed_int = [int(round(float(v))) for v in smoothed]
-        except Exception:
-            smoothed_int = joints
+        if bypass:
+            # Emergency retreat etc. — skip EMA + rate clamp so the command
+            # lands in one tick. Reset the EMA so it re-bootstraps from the
+            # snapped pose instead of lagging the arm back toward the old
+            # state on the next normal tick.
+            smoothed_int = list(joints)
+            self.joint_ema.reset(
+                initial=np.array(smoothed_int, dtype=np.float64),
+            )
+        else:
+            prev = np.array(self.bb.current_q, dtype=np.float64)
+            try:
+                smoothed = self.joint_ema.update(
+                    np.array(joints, dtype=np.float64),
+                )
+                if prev.shape == smoothed.shape:
+                    smoothed = self.joint_rate_clamp.apply(prev, smoothed)
+                smoothed_int = [int(round(float(v))) for v in smoothed]
+            except Exception:
+                smoothed_int = joints
         self.bb.current_q = smoothed_int
         try:
             self._send_cmd_user(smoothed_int, delta)

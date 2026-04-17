@@ -1026,11 +1026,21 @@ class _SweepTick(_BranchBehaviour):
         sol = solve_ik(x, y, z_mm)
         if sol is None:
             return None
+        # SWEEP_WRIST_V_DEG overrides the auto-leveled IK wrist-vertical so
+        # the simple-replan sweep can pin the gripper horizontal. Clamped
+        # to the joint limits; set to None in constants.py to restore the
+        # IK default (``shoulder + elbow - 180``).
+        wrist_v_override = getattr(_c, "SWEEP_WRIST_V_DEG", None)
+        if wrist_v_override is not None:
+            w_lo, w_hi = _c.JOINT_LIMITS[3]
+            wrist_v = int(max(w_lo, min(w_hi, int(wrist_v_override))))
+        else:
+            wrist_v = int(sol.wrist_vert)
         return [
             int(sol.base),
             int(sol.shoulder),
             int(sol.elbow),
-            int(sol.wrist_vert),
+            wrist_v,
             int(current_q[4]),
             int(current_q[5]),
         ]

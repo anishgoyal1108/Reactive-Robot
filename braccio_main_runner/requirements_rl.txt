@@ -1,0 +1,26 @@
+# RL training dependencies (Stage 4+).
+# Install alongside requirements.txt:
+#   pip install -r requirements.txt -r requirements_rl.txt
+#
+# GPU note: if CUDA is available, replace the torch line with the
+# appropriate index URL from https://pytorch.org/get-started/locally/
+# Example (CUDA 12.1):
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+
+# Core ML
+torch>=2.0
+stable-baselines3>=2.3
+gymnasium>=0.29
+
+# Imitation / behavioral cloning
+imitation>=1.0
+
+# Physics simulation
+pybullet>=3.2
+
+# Scientific computing (likely already present via matplotlib deps)
+scipy>=1.12
+
+# DTW for path annotator (pure-Python fallback is built into path_annotator.py
+# if fastdtw is unavailable, so this is optional but faster)
+fastdtw>=0.3.4

@@ -196,6 +196,7 @@ class CursesDisplay:
             vmax = tof.get('diag_raw_max_mm', [float('nan')] * num_ch)
             vcel = tof.get('diag_valid_cells', [0] * num_ch)
             zcnt = tof.get('diag_zone_count', [0] * num_ch)
+
             for ch in range(num_ch):
                 if ch in SENSOR_IGNORE_CHANNELS:
                     parts.append(f"CH{ch}:[ign]")
@@ -222,6 +223,7 @@ class CursesDisplay:
                     flag = "!" if mn < thr else ""
                     parts.append(f"CH{ch}:{mn:.0f}/{thr:.0f}{flag}{suffix}")
             line = "  " + "   ".join(parts)
+
             self._safe_addstr(row, 0, line[:w - 1], curses.color_pair(_C_DIM))
             row += 1
 
@@ -240,10 +242,12 @@ class CursesDisplay:
 
         # Obstacle response
         if row < h - 1:
-            obs = state.get('obstacle_response', 'clear')
-            src = state.get('obstacle_source', '')
-            dist = state.get('obstacle_dist_mm', -1)
-            thresh = tof.get('tof_threshold_mm', 300)
+            obs    = state.get('obstacle_response', 'clear')
+            src    = state.get('obstacle_source', '')
+            dist   = state.get('obstacle_dist_mm', -1)
+            thresholds = tof.get('tof_thresholds_mm', [300.0, 300.0, 50.0, 50.0])
+            thresh = min(thresholds[ch] for ch in range(len(thresholds))
+                         if ch not in SENSOR_IGNORE_CHANNELS)
 
             if obs == 'back_away':
                 line = f"  *** OBSTACLE: BACK AWAY (IR, ToF missed!) ***"
@@ -331,6 +335,7 @@ class CursesDisplay:
                         f"max_conf={mem.get('max_confidence', 0.0):.2f}")
                 self._safe_addstr(row, 0, line[:w - 1], curses.color_pair(_C_DIM))
                 row += 1
+
 
         return row + 1
 

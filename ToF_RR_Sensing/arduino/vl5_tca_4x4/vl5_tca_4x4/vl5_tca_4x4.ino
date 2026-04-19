@@ -34,8 +34,10 @@ const uint8_t TOF_MUX_CH[NUM_TOF_SENSORS] = {0, 1, 2, 3};
 uint32_t tfSeqCounter = 0;
 uint32_t imuSeqCounter = 0;
 
-const int IR_PIN_BIT0 = 2;
-const int IR_PIN_BIT1 = 3;
+// Four IR obstacle sensors — active LOW (LOW = obstacle detected)
+// Mounted 90° apart around the arm base: front, left, back, right
+const int IR_PINS[]              = {2, 3, 4, 5};
+const int IR_NUM                 = 4;
 const unsigned long IR_SEND_INTERVAL_MS = 100;
 unsigned long lastIRSend = 0;
 unsigned long lastIMUSend = 0;
@@ -335,9 +337,22 @@ void readAndSendIR() {
   if (now - lastIRSend < IR_SEND_INTERVAL_MS) return;
   lastIRSend = now;
 
-  uint8_t bit0 = digitalRead(IR_PIN_BIT0) ? 1 : 0;
-  uint8_t bit1 = digitalRead(IR_PIN_BIT1) ? 1 : 0;
-  uint8_t ir_val = (bit1 << 1) | bit0;
+  // Count how many sensors detect an obstacle (active LOW).
+  uint8_t count = 0;
+  for (int i = 0; i < IR_NUM; i++) {
+    if (digitalRead(IR_PINS[i]) == LOW) count++;
+  }
+
+  // Map to 2-bit severity — compatible with existing Python IR parsing.
+  //   0 sensors → 0 CLEAR
+  //   1 sensor  → 1 FAR
+  //   2 sensors → 2 CLOSE
+  //   3-4 sensors → 3 DANGER (emergency stop)
+  uint8_t ir_val;
+  if      (count == 0) ir_val = 0;
+  else if (count == 1) ir_val = 1;
+  else if (count == 2) ir_val = 2;
+  else                 ir_val = 3;
 
   Serial.print("IR,");
   Serial.println(ir_val);
@@ -350,8 +365,9 @@ void setup() {
   Wire.begin();
   Wire.setClock(1000000);
 
-  pinMode(IR_PIN_BIT0, INPUT);
-  pinMode(IR_PIN_BIT1, INPUT);
+  for (int i = 0; i < IR_NUM; i++) {
+    pinMode(IR_PINS[i], INPUT_PULLUP);
+  }
 
   printHelp();
   announceMode();

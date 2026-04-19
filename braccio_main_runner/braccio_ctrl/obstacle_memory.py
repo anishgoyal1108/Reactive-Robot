@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 import threading
 from collections import defaultdict
+from typing import List
 
 import numpy as np
 
@@ -53,11 +54,11 @@ class PersistentObstacleMemory:
         )
 
     def ingest(self, points: np.ndarray) -> None:
-        """Ingest world-frame points shape (N,3)."""
+        """Ingest world-frame points shape (N, 3)."""
         if points is None or len(points) == 0:
             return
         with self._lock:
-            hits = defaultdict(int)
+            hits: dict[tuple, int] = defaultdict(int)
             for p in points:
                 k = self._key(float(p[0]), float(p[1]), float(p[2]))
                 hits[k] += 1
@@ -83,9 +84,7 @@ class PersistentObstacleMemory:
                 self._conf.pop(k, None)
 
     def query_radius(self, pos_xyz: tuple[float, float, float], r_mm: float) -> bool:
-        """
-        Return True if any occupied cell overlaps a sphere around pos.
-        """
+        """Return True if any occupied cell overlaps a sphere around pos."""
         x, y, z = pos_xyz
         rr = float(r_mm)
         kx, ky, kz = self._key(x, y, z)
@@ -104,6 +103,29 @@ class PersistentObstacleMemory:
                             return True
         return False
 
+    def occupied_thetas(self, r_mm: float, z_mm: float,
+                        r_tol: float = 100.0, z_tol: float = 80.0) -> List[float]:
+        """
+        Return theta values (degrees) of occupied voxels near the given (r, z) slice.
+        Used by AutoSweeper to get forbidden theta bands from persistent memory.
+        """
+        thetas = []
+        with self._lock:
+            for key, conf in self._conf.items():
+                if conf < self._occ:
+                    continue
+                cx = (key[0] + 0.5) * self._cell
+                cy = (key[1] + 0.5) * self._cell
+                cz = (key[2] + 0.5) * self._cell
+                if abs(cz - z_mm) > z_tol:
+                    continue
+                cr = math.sqrt(cx * cx + cy * cy)
+                if abs(cr - r_mm) > r_tol:
+                    continue
+                theta = math.degrees(math.atan2(cy, cx))
+                thetas.append(max(0.0, min(180.0, theta)))
+        return thetas
+
     def snapshot_stats(self) -> dict:
         with self._lock:
             n = len(self._conf)
@@ -117,9 +139,13 @@ class PersistentObstacleMemory:
                 'occupied_threshold': self._occ,
             }
 
+    def clear(self) -> None:
+        """Remove all voxels (call after IMU recalibration — world frame changed)."""
+        with self._lock:
+            self._conf.clear()
+
     def _prune_to_budget(self) -> None:
         if len(self._conf) <= self._max_cells:
             return
-        # Drop lowest-confidence cells first.
         keep = sorted(self._conf.items(), key=lambda kv: kv[1], reverse=True)[: self._max_cells]
         self._conf = dict(keep)

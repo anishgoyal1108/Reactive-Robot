@@ -33,7 +33,7 @@ from .imu_state import IMUState
 from .serial_bridge import ensure_serial_device_path
 from .constants import (
     TOF_THRESHOLDS_MM,
-    SENSOR_PRIMARY_CHANNELS,
+    SENSOR_REPLAN_CHANNELS,
     SENSOR_ADVISORY_CHANNELS,
     SENSOR_IGNORE_CHANNELS,
 )
@@ -142,11 +142,11 @@ class ToFState:
                 'ir_label':     self.ir_label,
                 'ir_action':    self.ir_action,
                 'ir_last_rx':   self.ir_last_rx,
-                'obstacle_response': self.obstacle_response,
-                'obstacle_source':   self.obstacle_source,
-                'obstacle_dist_mm':  self.obstacle_dist_mm,
-                'tof_threshold_mm':  self.tof_threshold_mm,
-                'tof_thresholds_mm': list(self.tof_thresholds_mm),
+                'obstacle_response':  self.obstacle_response,
+                'obstacle_source':    self.obstacle_source,
+                'obstacle_dist_mm':   self.obstacle_dist_mm,
+                'tof_threshold_mm':   self.tof_threshold_mm,
+                'tof_thresholds_mm':  list(self.tof_thresholds_mm),
                 'mode':         self.mode,
                 'connected':    self.connected,
                 'port':         self.port,
@@ -161,14 +161,19 @@ class ToFState:
         """
         Recompute combined obstacle response from ToF + IR.
 
-        Priority: IR DANGER > ToF threshold > IR CLOSE > IR FAR > CLEAR.
+        Channel authority (defined in constants.py):
+          SENSOR_REPLAN_CHANNELS   (CH0, CH1 — sides): trigger REPLAN
+          SENSOR_ADVISORY_CHANNELS (CH2 — top):         advisory only, no REPLAN
+          SENSOR_IGNORE_CHANNELS   (CH3 — bottom):      completely skipped
+
+        Priority: IR DANGER > IR CLOSE > primary ToF REPLAN > IR FAR > CLEAR.
         """
         with self._lock:
             # --- IR check (second line of defense — if it fires, ToF missed) ---
             if self.ir_bits == 3:
                 self.obstacle_response = ObstacleResponse.BACK_AWAY
                 self.obstacle_source   = 'ir'
-                self.obstacle_dist_mm  = 0.0  # unknown exact, but very close
+                self.obstacle_dist_mm  = 0.0
                 return
             if self.ir_bits == 2:
                 self.obstacle_response = ObstacleResponse.BACK_AWAY
@@ -176,12 +181,12 @@ class ToFState:
                 self.obstacle_dist_mm  = 0.0
                 return
 
-            # --- ToF check (primary detection — replan trajectory) ---
+            # --- Primary ToF check (SENSOR_REPLAN_CHANNELS only) ---
             closest     = float('inf')
             closest_ch  = -1
             closest_thr = -1.0
             for ch in range(self.num_channels):
-                if ch in SENSOR_IGNORE_CHANNELS:
+                if ch in SENSOR_IGNORE_CHANNELS:   # CH3 (bottom): skip
                     continue
                 if self.active[ch] == 0:
                     continue
@@ -193,14 +198,13 @@ class ToFState:
                        if ch < len(self.tof_thresholds_mm)
                        else self.tof_threshold_mm)
                 if ch in SENSOR_ADVISORY_CHANNELS:
-                    # Advisory channels never trigger replans, but can still
-                    # be shown on the display.
+                    # Advisory channels never trigger replans
                     continue
-                if ch not in SENSOR_PRIMARY_CHANNELS:
+                if ch not in SENSOR_REPLAN_CHANNELS:
                     continue
                 if ch_min < thr and ch_min < closest:
-                    closest    = ch_min
-                    closest_ch = ch
+                    closest     = ch_min
+                    closest_ch  = ch
                     closest_thr = thr
 
             if closest_ch >= 0:
@@ -221,6 +225,11 @@ class ToFState:
             self.obstacle_response = ObstacleResponse.CLEAR
             self.obstacle_source   = ''
             self.obstacle_dist_mm  = -1.0
+
+    @property
+    def primary_threshold_mm(self) -> float:
+        """Minimum threshold across primary (REPLAN) channels, for display."""
+        return min(self.tof_thresholds_mm[ch] for ch in SENSOR_REPLAN_CHANNELS)
 
 
 class ToFBridge:

@@ -9,14 +9,9 @@ current goal, computed at record time from the sequence editor's target state.
 
 BC target for every transition:
   action[0] = clip(goal_dtheta, -1, 1)   move theta toward goal
-  action[1] = clip(goal_dz,     -1, 1)   move z toward goal
-  action[2] = 0.0                         hold current slew rate
-
-Note: the action space has no Δr component (action space is [Δtheta, Δz,
-Δdelta]).  goal_dr (obs[68]) is present in the obs but is not actionable
-directly — the policy learns to reach different r values only via sim SAC
-fine-tuning.  If this proves limiting, extend the action space to 4D before
-training.
+  action[1] = clip(goal_dr,     -1, 1)   move r toward goal
+  action[2] = clip(goal_dz,     -1, 1)   move z toward goal
+  action[3] = 0.0                         hold current slew rate
 
 Transitions are filtered to:
   - ir_bits == 0  (arm not in collision or danger during collection)
@@ -53,7 +48,7 @@ OBS_IR_IDX       = 53               # obs[53] = ir_bits / 3.0
 OBS_GOAL_SLICE   = slice(67, 70)    # [goal_dtheta, goal_dr, goal_dz]
 
 # ── Action layout ────────────────────────────────────────────────────────────
-ACT_DIM          = 3                # [Δtheta_n, Δz_n, Δdelta_n]
+ACT_DIM          = 4                # [Δtheta_n, Δr_n, Δz_n, Δdelta_n]
 
 # ── Filtering thresholds ─────────────────────────────────────────────────────
 IR_CLEAR_THRESH  = 0.12             # obs[53] < this  →  ir_bits == 0
@@ -106,14 +101,15 @@ def _bc_label(obs: np.ndarray) -> np.ndarray:
     Derive a BC target action from the goal-delta already in the obs vector.
 
     obs[67] = (goal_theta - theta) / 90   →  action[0]  (Δtheta, normalised)
-    obs[68] = (goal_r    - r)     / 115   →  no action dim; ignored
-    obs[69] = (goal_z    - z)     / 125   →  action[1]  (Δz, normalised)
-    action[2] = 0.0                        →  hold current slew rate
+    obs[68] = (goal_r    - r)     / 115   →  action[1]  (Δr,     normalised)
+    obs[69] = (goal_z    - z)     / 125   →  action[2]  (Δz,     normalised)
+    action[3] = 0.0                        →  hold current slew rate
     """
     goal = obs[OBS_GOAL_SLICE]                          # [dtheta, dr, dz]
     a0   = float(np.clip(goal[0], -1.0, 1.0))          # theta toward goal
-    a1   = float(np.clip(goal[2], -1.0, 1.0))          # z toward goal
-    return np.array([a0, a1, 0.0], dtype=np.float32)
+    a1   = float(np.clip(goal[1], -1.0, 1.0))          # r toward goal
+    a2   = float(np.clip(goal[2], -1.0, 1.0))          # z toward goal
+    return np.array([a0, a1, a2, 0.0], dtype=np.float32)
 
 
 # ── Data loading ─────────────────────────────────────────────────────────────
@@ -270,12 +266,12 @@ def load_bc_warmstart(sac_model, bc_path: str = DEFAULT_OUT,
     SB3 SAC actor layout with policy_kwargs=dict(net_arch=[256, 256]):
       actor.latent_pi : Sequential  [Linear(74→256), ReLU,
                                      Linear(256→256), ReLU]
-      actor.mu        : Linear(256→3)
+      actor.mu        : Linear(256→4)
 
     BCPolicy layout:
       net : Sequential  [Linear(74→256),  ReLU,    # net.0 / net.1
                          Linear(256→256), ReLU,    # net.2 / net.3
-                         Linear(256→3),   Tanh]    # net.4 / net.5
+                         Linear(256→4),   Tanh]    # net.4 / net.5
 
     SB3 applies its own squashing (Tanh + log-prob correction) separately,
     so we copy only the weight matrices — the Tanh from BCPolicy is not

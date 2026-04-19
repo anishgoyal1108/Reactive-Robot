@@ -19,6 +19,14 @@ Term 8 (holding penalty) was removed: it punished near-zero action when the
 goal was far, but the sequence editor legitimately holds at waypoints during
 wait_ms.  Goal progress (term 1) already penalises stalling implicitly.
 
+Action convention
+-----------------
+action_n is 4-float normalised: [Δtheta_n, Δr_n, Δz_n, Δdelta_n].
+  action_n[0] Δtheta — primary collision axis (sweeping into obstacles)
+  action_n[1] Δr     — radial reach change
+  action_n[2] Δz     — height change
+  action_n[3] Δdelta — slew rate (not penalised by speed terms)
+
 Three ways to use this module
 -----------------------------
 1. In-loop (live training / sweeper):
@@ -33,11 +41,9 @@ Three ways to use this module
    50/50 by the annotator, this module is additive):
      rewards_total = rewards_dtw + rewards_compute
 
-Action convention
------------------
 All reward terms assume the action vector is **normalised** to roughly
-[-1, +1] per component.  Raw (theta°, z mm, delta_int) deltas recorded by
-`RLRecorder` must be passed through `normalize_action()` first.
+[-1, +1] per component.  Raw (theta°, r mm, z mm, delta_int) deltas recorded
+by `RLRecorder` must be passed through `normalize_action()` first.
 
 """
 
@@ -83,8 +89,9 @@ SPEED_COST_GAIN      = 0.02    # quadratic on action[0], action[1]
 SPEED_LIMIT_ZONE_MM  = 150.0   # below this range proximity throttles speed
 SPEED_LIMIT_GAIN     = 1.00
 
-JERK_GAIN_THETA      = 0.02    # |Δaction[0]|
-JERK_GAIN_Z          = 0.01
+JERK_GAIN_THETA      = 0.02    # |Δaction[0]|  theta
+JERK_GAIN_R          = 0.01    # |Δaction[1]|  r
+JERK_GAIN_Z          = 0.01    # |Δaction[2]|  z
 
 
 # ── Helpers: un-normalise obs fields ────────────────────────────────────────
@@ -120,16 +127,18 @@ _DELTA_SPAN = max(1.0, float(DELTA_MAX - DELTA_MIN))
 
 def normalize_action(raw_action: np.ndarray) -> np.ndarray:
     """
-    Convert the raw (Δtheta°, Δz mm, Δdelta int) action recorded by
+    Convert the raw (Δtheta°, Δr mm, Δz mm, Δdelta int) action recorded by
     `RLRecorder` into the normalised [-1, +1] convention the reward expects.
 
-    One `THETA_STEP` / `Z_STEP` keypress maps to ±1.0, saturating further.
+    One step keypress maps to ±1.0, saturating further.
     """
+    from .constants import R_STEP
     raw = np.asarray(raw_action, dtype=np.float32)
-    a0 = np.clip(raw[0] / THETA_STEP, -1.0, 1.0)
-    a1 = np.clip(raw[1] / Z_STEP,     -1.0, 1.0)
-    a2 = np.clip(raw[2] / _DELTA_SPAN, -1.0, 1.0)
-    return np.array([a0, a1, a2], dtype=np.float32)
+    a0 = np.clip(raw[0] / THETA_STEP,  -1.0, 1.0)
+    a1 = np.clip(raw[1] / R_STEP,      -1.0, 1.0)
+    a2 = np.clip(raw[2] / Z_STEP,      -1.0, 1.0)
+    a3 = np.clip(raw[3] / _DELTA_SPAN, -1.0, 1.0)
+    return np.array([a0, a1, a2, a3], dtype=np.float32)
 
 
 # ── Reward computation ─────────────────────────────────────────────────────
@@ -188,22 +197,31 @@ def compute_reward(obs:          np.ndarray,
             ramp = 1.0 - (dist / thr)
             r -= PROXIMITY_GAIN * (ramp * ramp)
 
-    # ── 5. Speed penalty (quadratic on theta/z action) ───────────────────
-    a0, a1 = float(action_n[0]), float(action_n[1])
-    r -= SPEED_COST_GAIN * (a0 * a0 + a1 * a1)
+    # ── 5. Speed penalty (quadratic on all spatial action dims) ──────────
+    # action: [Δtheta_n, Δr_n, Δz_n, Δdelta_n] — delta not penalised here
+    a0 = float(action_n[0])   # Δtheta
+    a1 = float(action_n[1])   # Δr
+    a2 = float(action_n[2])   # Δz
+    r -= SPEED_COST_GAIN * (a0 * a0 + a1 * a1 + a2 * a2)
 
     # ── 6. Proximity-scaled speed limit ──────────────────────────────────
+    # Theta and r both move the arm laterally toward obstacles; z is safer.
     min_dist = min(ch0_min_mm, ch1_min_mm)
     if min_dist < SPEED_LIMIT_ZONE_MM:
         allowed_speed = (min_dist / SPEED_LIMIT_ZONE_MM) ** 2   # ∈ [0, 1]
-        excess = max(0.0, abs(a0) - allowed_speed)
-        r -= SPEED_LIMIT_GAIN * excess
+        excess_theta = max(0.0, abs(a0) - allowed_speed)
+        excess_r     = max(0.0, abs(a1) - allowed_speed)
+        r -= SPEED_LIMIT_GAIN * excess_theta
+        r -= SPEED_LIMIT_GAIN * 0.5 * excess_r   # r less collision-critical than theta
 
     # ── 7. Jerk penalty ──────────────────────────────────────────────────
     if prev_action_n is not None:
-        p0, p1 = float(prev_action_n[0]), float(prev_action_n[1])
+        p0 = float(prev_action_n[0])
+        p1 = float(prev_action_n[1])
+        p2 = float(prev_action_n[2])
         r -= JERK_GAIN_THETA * abs(a0 - p0)
-        r -= JERK_GAIN_Z     * abs(a1 - p1)
+        r -= JERK_GAIN_R     * abs(a1 - p1)
+        r -= JERK_GAIN_Z     * abs(a2 - p2)
 
     return float(r)
 

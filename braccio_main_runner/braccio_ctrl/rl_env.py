@@ -10,10 +10,11 @@ Observation space : Box(-2.0, +2.0, shape=(74,), dtype=float32)
   obs[3] = dir_to_goal = sign(goal_theta - theta) ∈ {-1, 0, +1}.
   Sweep mode is a special case: goals alternate between 0° and 180°.
 
-Action space : Box(-1.0, +1.0, shape=(3,), dtype=float32)
-  [0] Δtheta  normalised  (+1.0 == one THETA_STEP° in the forward direction)
-  [1] Δz      normalised  (+1.0 == one Z_STEP mm upward)
-  [2] Δdelta  normalised  (+1.0 == full slew-rate range toward DELTA_MAX)
+Action space : Box(-1.0, +1.0, shape=(4,), dtype=float32)
+  [0] Δtheta  normalised  (+1.0 == one THETA_STEP° forward)
+  [1] Δr      normalised  (+1.0 == one R_STEP mm outward)
+  [2] Δz      normalised  (+1.0 == one Z_STEP mm upward)
+  [3] Δdelta  normalised  (+1.0 == full slew-rate range toward DELTA_MAX)
 
   Raw (physical) deltas:  use denormalize_action() to convert back.
   Normalised actions:     pass directly to compute_reward().
@@ -37,12 +38,12 @@ import gymnasium as gym
 from gymnasium import spaces
 
 from .rl_reward import compute_reward
-from .constants import THETA_STEP, Z_STEP, DELTA_MIN, DELTA_MAX
+from .constants import THETA_STEP, R_STEP, Z_STEP, DELTA_MIN, DELTA_MAX
 
 # ── Shared constants ──────────────────────────────────────────────────────────
 
 _OBS_DIM          = 74
-_ACT_DIM          = 3
+_ACT_DIM          = 4
 _OBS_LOW          = -2.0
 _OBS_HIGH         =  2.0
 _DELTA_SPAN       = float(max(1, DELTA_MAX - DELTA_MIN))
@@ -68,7 +69,7 @@ class BraccioBaseEnv(gym.Env):
         rl_recorder._encode_obs layout.
 
     _apply_action(action_n: np.ndarray) → dict
-        Apply a normalised 3-float action to the environment for one timestep.
+        Apply a normalised 4-float action to the environment for one timestep.
         Return an info dict consumed by compute_reward() and _compute_done():
           'obstacle_response' : str   'clear' | 'replan' | 'back_away'
           'ir_bits'           : int   0 or 3  (NOR-gate hardware)
@@ -188,13 +189,14 @@ class BraccioBaseEnv(gym.Env):
 
         Returns
         -------
-        raw : (3,) float32  [Δtheta°, Δz mm, Δdelta (float)]
+        raw : (4,) float32  [Δtheta°, Δr mm, Δz mm, Δdelta (float)]
         """
         a = np.asarray(action_n, dtype=np.float32)
         return np.array([
             float(a[0]) * THETA_STEP,
-            float(a[1]) * Z_STEP,
-            float(a[2]) * _DELTA_SPAN,
+            float(a[1]) * R_STEP,
+            float(a[2]) * Z_STEP,
+            float(a[3]) * _DELTA_SPAN,
         ], dtype=np.float32)
 
     @staticmethod

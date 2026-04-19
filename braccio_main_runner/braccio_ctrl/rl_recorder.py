@@ -25,10 +25,11 @@ sweep-mode-specific and meaningless in sequence-editor mode.  It is now
 `dir_to_goal` = np.sign(goal_theta - theta), which is universally valid for
 any goal (sweep goals and named-state waypoints alike).  OBS_DIM stays 74.
 
-Action vector (3 floats):
+Action vector (4 floats):
   [0] Δtheta  (degrees, raw)
-  [1] Δz      (mm, raw)
-  [2] Δdelta  (slew-rate integer change)
+  [1] Δr      (mm, raw)
+  [2] Δz      (mm, raw)
+  [3] Δdelta  (slew-rate integer change)
 
 Human feedback: call add_human_feedback(+/-0.5) from the UI thread to adjust
 the rewards of the most recent N_FEEDBACK_STEPS transitions.
@@ -234,6 +235,7 @@ class RLRecorder:
 
         self._prev_obs:   Optional[np.ndarray] = None
         self._prev_theta: Optional[float]      = None
+        self._prev_r:     Optional[float]      = None
         self._prev_z:     Optional[float]      = None
         self._prev_delta: Optional[int]        = None
 
@@ -320,9 +322,10 @@ class RLRecorder:
         )
 
         if self._prev_obs is not None:
-            # Compute action: raw deltas (normalized by caller when used in training)
+            # Compute 4D action: raw deltas (normalized by caller when used in training)
             action = np.array([
                 theta - (self._prev_theta or theta),
+                r     - (self._prev_r     or r),
                 z     - (self._prev_z     or z),
                 float(delta - (self._prev_delta or delta)),
             ], dtype=np.float32)
@@ -345,12 +348,13 @@ class RLRecorder:
 
         self._prev_obs   = obs
         self._prev_theta = theta
+        self._prev_r     = r
         self._prev_z     = z
         self._prev_delta = delta
 
     def _approx_bytes(self) -> int:
         n = len(self._obs_buf)
-        return n * (OBS_DIM * 2 + 3 + 1 + 3 + 1 + 8) * 4  # rough estimate
+        return n * (OBS_DIM * 2 + 4 + 1 + 3 + 1 + 8) * 4  # rough estimate (4D action)
 
     # ── Flush to disk ─────────────────────────────────────────────────────
 
@@ -388,5 +392,6 @@ class RLRecorder:
             self._ts_buf.clear()
         self._prev_obs   = None
         self._prev_theta = None
+        self._prev_r     = None
         self._prev_z     = None
         self._prev_delta = None

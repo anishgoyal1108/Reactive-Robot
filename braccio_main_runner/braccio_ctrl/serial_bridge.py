@@ -9,16 +9,25 @@ All writes go through a Lock so the control loop and any other caller
 can safely call send_cmd() concurrently.
 """
 
+from __future__ import annotations
+
 import queue
 import threading
 import time
+from typing import TYPE_CHECKING, Any
 
+if TYPE_CHECKING:
+    import serial  # pyright: ignore[reportMissingModuleSource]
+
+_SERIAL_AVAILABLE = False
+_serial_mod: Any = None
 try:
-    import serial
-    import serial.tools.list_ports
+    import serial as _serial_mod  # pyright: ignore[reportMissingModuleSource]
+    import serial.tools.list_ports  # pyright: ignore[reportMissingModuleSource]  # noqa: F401
+
     _SERIAL_AVAILABLE = True
 except ImportError:
-    _SERIAL_AVAILABLE = False
+    pass
 
 from .protocol import parse_response, cmd_ping
 from .constants import BAUD_RATE, ARM_DATA_PORT, TOF_DATA_PORT
@@ -36,28 +45,28 @@ def ensure_serial_device_path(port: str, what: str) -> None:
     if not p.isdigit():
         return
     n = int(p)
-    hint = ''
+    hint = ""
     if n in (ARM_DATA_PORT, TOF_DATA_PORT):
         hint = (
-            f' {n} is the UDP port for arm_plotter_app ({ARM_DATA_PORT}) or '
-            f'tof_plotter_app ({TOF_DATA_PORT}); serial devices look like '
-            f'/dev/ttyACM0 or COM3.'
+            f" {n} is the UDP port for arm_plotter_app ({ARM_DATA_PORT}) or "
+            f"tof_plotter_app ({TOF_DATA_PORT}); serial devices look like "
+            f"/dev/ttyACM0 or COM3."
         )
     raise ValueError(
-        f'{what} must be a USB serial device path, not the number {p!r}.{hint}'
+        f"{what} must be a USB serial device path, not the number {p!r}.{hint}"
     )
 
 
 class SerialBridge:
     def __init__(self, port: str, baud: int = BAUD_RATE):
-        self._port  = port
-        self._baud  = baud
-        self._ser   = None
-        self._write_lock   = threading.Lock()
-        self._stop_event   = threading.Event()
-        self._reader_thread = None
-        self.response_queue: queue.Queue = queue.Queue(maxsize=128)
-        self.connect_error: str = ""   # set on connect() failure; empty on success
+        self._port: str = port
+        self._baud: int = baud
+        self._ser: serial.Serial | None = None
+        self._write_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._reader_thread: threading.Thread | None = None
+        self.response_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=128)
+        self.connect_error: str = ""  # set on connect() failure; empty on success
 
     # ── Connection ────────────────────────────────────────────────────────
 
@@ -76,7 +85,8 @@ class SerialBridge:
             self.connect_error = str(exc)
             return False
         try:
-            self._ser = serial.Serial(
+            assert _serial_mod is not None
+            self._ser = _serial_mod.Serial(
                 self._port,
                 self._baud,
                 timeout=0.1,
@@ -115,7 +125,7 @@ class SerialBridge:
         while time.monotonic() < deadline:
             try:
                 resp = self.response_queue.get(timeout=0.1)
-                if resp['type'] == 'pong':
+                if resp["type"] == "pong":
                     return True
             except queue.Empty:
                 pass
@@ -126,9 +136,10 @@ class SerialBridge:
 
     def close(self) -> None:
         self._stop_event.set()
-        if self._ser and self._ser.is_open:
+        ser = self._ser
+        if ser is not None and ser.is_open:
             try:
-                self._ser.close()
+                ser.close()
             except Exception:
                 pass
 
@@ -139,12 +150,13 @@ class SerialBridge:
         Send a command string to the Arduino.  Thread-safe.
         cmd must end with '\\n' (all protocol.py builders do this).
         """
-        if not self.is_open():
+        ser = self._ser
+        if ser is None or not ser.is_open:
             return
         with self._write_lock:
             try:
-                self._ser.write(cmd.encode('ascii'))
-                self._ser.flush()
+                ser.write(cmd.encode("ascii"))
+                ser.flush()
             except Exception:
                 pass
 
@@ -154,10 +166,14 @@ class SerialBridge:
         """Daemon thread: read lines, parse, enqueue."""
         while not self._stop_event.is_set():
             try:
-                raw = self._ser.readline()
+                ser = self._ser
+                if ser is None:
+                    time.sleep(0.05)
+                    continue
+                raw = ser.readline()
                 if not raw:
                     continue
-                line = raw.decode('ascii', errors='replace').strip()
+                line = raw.decode("ascii", errors="replace").strip()
                 if not line:
                     continue
                 parsed = parse_response(line)
@@ -173,14 +189,15 @@ class SerialBridge:
             except Exception:
                 if self._stop_event.is_set():
                     break
-                time.sleep(0.05)   # brief back-off on transient errors
+                time.sleep(0.05)  # brief back-off on transient errors
 
     # ── Port discovery ────────────────────────────────────────────────────
 
     @staticmethod
-    def list_ports() -> list:
+    def list_ports() -> list[tuple[str, str]]:
         """Return a list of (device, description) tuples for all serial ports."""
         if not _SERIAL_AVAILABLE:
             return []
-        return [(p.device, p.description)
-                for p in serial.tools.list_ports.comports()]
+        import serial.tools.list_ports as lp  # pyright: ignore[reportMissingModuleSource]
+
+        return [(p.device, p.description) for p in lp.comports()]

@@ -1,0 +1,218 @@
+---
+title: "DSL Command Reference"
+---
+
+The Reactive Robot DSL is the language the curses sequence editor and the Blockly block editor both target. This page is a per-command reference. For the full grammar, see the [language reference](language-reference.qmd). For worked programs, see [examples](examples.qmd).
+
+## Catalogue
+
+| Keyword | Kind | Synopsis |
+|---------|------|----------|
+| `MOVE` | Statement | Move arm to a saved pose. |
+| `SET` | Statement | Set a single joint to an absolute angle. |
+| `WAIT` | Statement | Pause execution. |
+| `HOME` | Statement | Return to the hardware home pose. |
+| `REPEAT` | Block | Execute a body a fixed number of times. |
+| `IF` / `ELSE` | Block | Branch on a sensor condition. |
+| `WHILE` | Block | Loop while a sensor condition holds. |
+| `STATE` | Definition | Define a new named pose. |
+| `OBSTACLE` | Definition | Define a virtual obstacle (simulation only). |
+| `TOF[ch]` | Sensor expression | Read a ToF channel in millimetres. |
+| `IR` | Sensor expression | Read IR severity (0 to 3). |
+| `JOINT[name]` | Sensor expression | Read a joint angle in degrees. |
+
+## Statements
+
+### `MOVE`
+
+Move the arm to a saved pose from the state library.
+
+```
+MOVE <state_name> [WAIT <int>]
+```
+
+| Argument | Type | Required | Default | Notes |
+|----------|------|----------|---------|-------|
+| `state_name` | IDENT | yes | — | Must exist in the state library. The curses editor's static check and the web backend's `/dsl/validate` both confirm this. |
+| `WAIT <ms>` | INT | no | no wait | Milliseconds to sleep after the move completes. |
+
+Example:
+
+```
+MOVE HOME_REST WAIT 500
+```
+
+### `SET`
+
+Drive a single joint to an absolute angle.
+
+```
+SET <joint> <deg> [WAIT <int>]
+```
+
+| Argument | Type | Range | Notes |
+|----------|------|-------|-------|
+| `joint` | JOINT token | `B` / `S` / `E` / `WV` / `WR` / `G` | Base, Shoulder, Elbow, Wrist-Vertical, Wrist-Rotation, Gripper. |
+| `deg` | INT | 0 to 180 | Servo native units. |
+| `WAIT <ms>` | INT | optional | Milliseconds after the move. |
+
+Example:
+
+```
+SET B 45 WAIT 250
+```
+
+### `WAIT`
+
+Pause execution without moving.
+
+```
+WAIT <int>
+```
+
+| Argument | Type | Notes |
+|----------|------|-------|
+| `ms` | INT | Milliseconds. The interpreter polls the stop event so a long WAIT stays responsive to F6. |
+
+### `HOME`
+
+Send the arm to the hardware home pose.
+
+```
+HOME
+```
+
+No arguments. The home pose is baked into the Braccio firmware; the executor calls `backend.home()` directly rather than resolving a state-library entry.
+
+## Control flow
+
+### `REPEAT`
+
+```
+REPEAT <int> {
+  ...
+}
+```
+
+| Argument | Type | Notes |
+|----------|------|-------|
+| `count` | INT | Number of times to execute the body. Outer-most REPEAT drives the pass counter shown in the curses status bar. |
+
+### `IF` / `ELSE`
+
+```
+IF <condition> {
+  ...
+} ELSE {
+  ...
+}
+```
+
+The `ELSE` clause is optional. A `<condition>` is a sensor expression compared to a constant (see below).
+
+### `WHILE`
+
+```
+WHILE <condition> {
+  ...
+}
+```
+
+`WHILE` has a built-in 10 000-iteration safety cap. Exceeding it raises a runtime error and stops the sequence. The cap exists because the only way to escape a sensor-driven loop is to observe a sensor change; if the sensor never changes, the cap prevents a runaway.
+
+## Definitions
+
+### `STATE`
+
+Register a new named pose in the state library.
+
+```
+STATE <name> {
+  JOINTS <b> <s> <e> <wv> <wr> <g>
+}
+```
+
+| Argument | Type | Range | Notes |
+|----------|------|-------|-------|
+| `name` | IDENT | A-Z, 0-9, underscore, starts with a letter | The name is the same identifier `MOVE` accepts. |
+| `b s e wv wr g` | 6 x INT | 0 to 180 each | Base, Shoulder, Elbow, Wrist-Vertical, Wrist-Rotation, Gripper. |
+
+Example:
+
+```
+STATE PICKUP_READY {
+  JOINTS 90 60 140 120 90 73
+}
+```
+
+### `OBSTACLE`
+
+Define a virtual obstacle. Effective only under the `SimBackend`; the hardware backend ignores obstacle definitions.
+
+```
+OBSTACLE <name> {
+  POS <x> <y> <z>
+  RADIUS <r>
+  SHAPE <kind>
+}
+```
+
+| Argument | Type | Range | Notes |
+|----------|------|-------|-------|
+| `POS x y z` | 3 x SIGNED_NUMBER | — | Centre of the obstacle in world-frame millimetres. |
+| `RADIUS r` | SIGNED_NUMBER | > 0 | Bounding radius in millimetres. |
+| `SHAPE` | keyword | `BOX` / `SPHERE` / `CYLINDER` | Visual + collision primitive. |
+
+## Sensor expressions
+
+Sensor expressions appear inside `IF` and `WHILE` conditions. Each expression returns a numeric value compared to a constant via one of `<`, `<=`, `==`, `!=`, `>=`, `>`.
+
+### `TOF[ch]`
+
+```
+TOF[<int>] <op> <number>
+```
+
+- `ch` is 0, 1, 2, or 3. Channels 0, 1, 2 carry replan authority; channel 3 is ignored (floor).
+- Returns the minimum valid distance in the channel's 8x8 grid, in millimetres.
+- Example: `TOF[0] < 250`.
+
+### `IR`
+
+```
+IR <op> <int>
+```
+
+- Returns 0, 1, 2, or 3 matching the severity table ([see sensor reference](../hardware/sensors.qmd)).
+- Example: `IR >= 2` fires when two or more IR sensors detect an obstacle.
+
+### `JOINT[name]`
+
+```
+JOINT[<joint>] <op> <int>
+```
+
+- `joint` is one of `B`, `S`, `E`, `WV`, `WR`, `G`.
+- Returns the joint's current angle in degrees.
+- Example: `JOINT[B] > 150` waits until the base has swept past 150°.
+
+## Comments
+
+Anything from `#` to end of line is ignored.
+
+```
+# This line is a comment.
+MOVE HOME_REST   # trailing comment
+```
+
+## Legacy line-based format
+
+The interpreter accepts the original Braccio sequence format as a compatibility shim:
+
+```
+HOME_REST 500
+STOW_COMPACT 500
+REPEAT 3
+```
+
+Each line is `<STATE_NAME> <WAIT_MS>`. A trailing `REPEAT N` line wraps the whole sequence in an outer repeat. The compatibility layer lives in `braccio_ctrl/dsl/compat.py` and is auto-detected before the Lark grammar kicks in.

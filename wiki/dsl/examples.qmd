@@ -1,0 +1,105 @@
+---
+title: "DSL Examples"
+---
+
+Each example below parses cleanly and runs against either the hardware controller or the PyBullet digital twin. Examples marked "legacy" use the original line-based format; the interpreter accepts both.
+
+## 1. Minimal move
+
+```
+MOVE HOME_REST
+```
+
+The simplest valid sequence. The arm moves to the `HOME_REST` pose and the sequence terminates.
+
+## 2. Timed carry demo (legacy format)
+
+```
+# META_FULL_DEMO: height + range + rotation + claw + drop + recover
+HOME_REST 500
+STOW_COMPACT 500
+
+# descend and grab
+LOW_APPROACH_OPEN 800
+LOW_GRAB_CLOSE 500
+
+# lift through multiple heights
+LIFT_MID_CARRY 700
+LIFT_HIGH_CARRY 800
+
+# rotate and sweep
+ROTATE_LEFT_SCAN 700
+ROTATE_RIGHT_SCAN 700
+
+# drop and recover
+DROP_HIGH_OPEN 700
+HOME_REST 700
+
+REPEAT 3
+```
+
+`compat.py` rewrites this into an outer `REPEAT 3 { ... }` block before parsing.
+
+## 3. Sensor-gated branch
+
+```
+IF TOF[0] < 250 {
+  MOVE HOME_REST WAIT 100
+} ELSE {
+  MOVE STOW_COMPACT WAIT 100
+}
+```
+
+If the front ToF channel sees a surface closer than 250 mm, retreat to `HOME_REST`; otherwise fold into `STOW_COMPACT`.
+
+## 4. Define a pose and drive a joint
+
+```
+STATE MY_POSE {
+  JOINTS 90 90 90 90 90 73
+}
+
+MOVE MY_POSE WAIT 250
+SET B 45 WAIT 500
+```
+
+Definitions and statements interleave freely. `STATE` registrations take effect immediately, so a subsequent `MOVE` resolves against them.
+
+## 5. Obstacle-aware sim program
+
+```
+OBSTACLE PILLAR {
+  POS 150 0 80
+  RADIUS 40
+  SHAPE CYLINDER
+}
+
+REPEAT 5 {
+  MOVE HOME_REST WAIT 200
+  MOVE PICKUP_READY WAIT 400
+}
+```
+
+`OBSTACLE` is ignored on the hardware backend; in the digital twin the planner sees the virtual pillar and routes around it.
+
+## 6. Sensor-driven retreat loop
+
+```
+WHILE IR > 0 {
+  MOVE STEP WAIT 50
+}
+```
+
+The loop exits as soon as all IR sensors report clear. The 10 000-iteration safety cap prevents a hung sensor from stalling the arm indefinitely.
+
+## 7. Conditional pickup with a joint read
+
+```
+MOVE APPROACH
+WHILE JOINT[B] < 120 {
+  SET B 100 WAIT 100
+}
+MOVE GRIP
+```
+
+The `WHILE JOINT[B] < 120` condition polls the actual servo position, not a cached target, so mid-loop resistance or safety refusals do not break the termination condition.

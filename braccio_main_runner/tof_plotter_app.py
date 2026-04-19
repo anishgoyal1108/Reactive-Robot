@@ -18,13 +18,17 @@ Keyboard shortcuts (focus the plot window):
     1–4     — toggle per-channel pop-out window
 """
 
+from __future__ import annotations
+
 import argparse
 import csv
 import json
 import os
 import socket
 import time
+from collections.abc import Iterable
 from datetime import datetime
+from typing import TYPE_CHECKING, Protocol, TextIO
 
 import numpy as np
 import matplotlib
@@ -32,10 +36,25 @@ matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
+from braccio_ctrl.mpl_compat import figure_number
 from braccio_ctrl.constants import (
     TOF_UPSAMPLE_N, TOF_SURFACE_EVERY, TOF_PLOT_INTERVAL_MS,
     TOF_MAX_RANGE_MM, TOF_DATA_PORT, LOG_DIR, SCREENSHOT_DIR,
 )
+
+if TYPE_CHECKING:
+    from matplotlib.axes import Axes
+    from matplotlib.figure import Figure
+    from matplotlib.image import AxesImage
+    from matplotlib.text import Text
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+    from mpl_toolkits.mplot3d.axes3d import Axes3D
+
+
+class _CsvRowWriter(Protocol):
+    def writerow(self, row: Iterable[object]) -> object:
+        ...
+
 
 _CH_CMAPS  = ['viridis', 'plasma', 'inferno', 'cividis']
 _NUM_CH    = 4
@@ -53,8 +72,11 @@ def _upsample_bilinear(z: np.ndarray, N: int) -> np.ndarray:
 
 
 class ToFPlotterApp:
-    def __init__(self, port: int = TOF_DATA_PORT,
-                 upsample_n: int = TOF_UPSAMPLE_N):
+    def __init__(
+        self,
+        port: int = TOF_DATA_PORT,
+        upsample_n: int = TOF_UPSAMPLE_N,
+    ) -> None:
         self._port       = port
         self._upsample_n = upsample_n
         self._num_ch     = _NUM_CH
@@ -80,24 +102,25 @@ class ToFPlotterApp:
         self._sock.setblocking(False)
 
         # Main figure widgets
-        self._fig       = None
-        self._ax_heat   = []
-        self._ax_surf   = []
-        self._imshows   = []
-        self._surfaces  = []
-        self._status_txt = None
+        self._fig: Figure | None = None
+        self._ax_heat: list[Axes] = []
+        self._ax_surf: list[Axes3D] = []
+        self._imshows: list[AxesImage] = []
+        self._surfaces: list[Poly3DCollection] = []
+        self._status_txt: Text | None = None
+        self._link_txt: Text | None = None
 
         # Per-channel pop-outs
-        self._ind_figs  = [None] * _NUM_CH
-        self._ind_ax_h  = [None] * _NUM_CH
-        self._ind_ax_s  = [None] * _NUM_CH
-        self._ind_ims   = [None] * _NUM_CH
-        self._ind_surfs = [None] * _NUM_CH
+        self._ind_figs: list[Figure | None] = [None] * _NUM_CH
+        self._ind_ax_h: list[Axes | None] = [None] * _NUM_CH
+        self._ind_ax_s: list[Axes3D | None] = [None] * _NUM_CH
+        self._ind_ims: list[AxesImage | None] = [None] * _NUM_CH
+        self._ind_surfs: list[Poly3DCollection | None] = [None] * _NUM_CH
 
         # CSV logging
-        self._logging    = False
-        self._log_file   = None
-        self._log_writer = None
+        self._logging: bool = False
+        self._log_file: TextIO | None = None
+        self._log_writer: _CsvRowWriter | None = None
 
         # Drawing counters
         self._draw_count = [0] * _NUM_CH
@@ -111,10 +134,12 @@ class ToFPlotterApp:
         self._diag_vc        = [0] * _NUM_CH
         self._diag_zc        = [0] * _NUM_CH
 
-    def run(self):
+    def run(self) -> None:
         self._build_main_figure()
+        fig = self._fig
+        assert fig is not None
         self._anim = FuncAnimation(
-            self._fig, self._update,
+            fig, self._update,
             interval=TOF_PLOT_INTERVAL_MS,
             blit=False, cache_frame_data=False,
         )
@@ -122,7 +147,7 @@ class ToFPlotterApp:
 
     # ── Figure construction ───────────────────────────────────────────────
 
-    def _build_main_figure(self):
+    def _build_main_figure(self) -> None:
         N = self._upsample_n
         fig = plt.figure(figsize=(16, 8))
         fig.suptitle('ToF Sensors — Live View (4 Channels)', fontsize=11)
@@ -166,7 +191,7 @@ class ToFPlotterApp:
                 '[0] toggle  [1-4] pop-out')
         fig.text(0.5, 0.005, hint, ha='center', fontsize=6, color='#888888')
         fig.canvas.mpl_connect('key_press_event', self._on_key)
-        fig.tight_layout(rect=[0, 0.03, 1, 0.92])
+        fig.tight_layout(rect=(0.0, 0.03, 1.0, 0.92))
         self._fig = fig
 
     def _build_ind_figure(self, ch: int):
@@ -241,7 +266,9 @@ class ToFPlotterApp:
                   else 'Teensy serial NOT OPEN in runner')
             port = self._teensy_port or '(port ?)'
             link = f'UDP ~{self._udp_rate_hz:.1f} pkt/s | {ts} {port}'
-        self._link_txt.set_text(link)
+        lt = self._link_txt
+        if lt is not None:
+            lt.set_text(link)
 
         for ch in range(self._num_ch):
             grid = self._grids[ch]
@@ -280,17 +307,24 @@ class ToFPlotterApp:
 
             # Pop-out
             fig = self._ind_figs[ch]
-            if fig is not None and plt.fignum_exists(fig.number):
-                self._ind_ims[ch].set_data(zN)
+            if fig is not None and plt.fignum_exists(figure_number(fig)):
+                im_ind = self._ind_ims[ch]
+                if im_ind is not None:
+                    im_ind.set_data(zN)
                 if self._draw_count[ch] % TOF_SURFACE_EVERY == 0:
-                    try:
-                        self._ind_surfs[ch].remove()
-                    except Exception:
-                        pass
-                    self._ind_surfs[ch] = self._ind_ax_s[ch].plot_surface(
-                        self._XN, self._YN, zN,
-                        rstride=2, cstride=2, linewidth=0, antialiased=True,
-                    )
+                    surf_ind = self._ind_surfs[ch]
+                    if surf_ind is not None:
+                        try:
+                            surf_ind.remove()
+                        except Exception:
+                            pass
+                    ax_s = self._ind_ax_s[ch]
+                    if ax_s is not None:
+                        self._ind_surfs[ch] = ax_s.plot_surface(
+                            self._XN, self._YN, zN,
+                            rstride=2, cstride=2, linewidth=0,
+                            antialiased=True,
+                        )
                 fig.canvas.draw_idle()
             elif fig is not None:
                 self._ind_figs[ch]  = None
@@ -304,27 +338,32 @@ class ToFPlotterApp:
         ir     = self._ir_label
         dist   = self._obstacle_dist_mm
         thresh = self._tof_threshold_mm
-        if obs == 'back_away':
-            status = f'*** IR: {ir} — BACK AWAY (ToF missed!) ***'
-            self._status_txt.set_color('red')
-        elif obs == 'replan':
-            status = (f'ToF: {dist:.0f} mm < {thresh:.0f} mm threshold '
-                      f'— REPLAN TRAJECTORY')
-            self._status_txt.set_color('orange')
-        else:
-            status = f'Clear | IR: {ir} | Threshold: {thresh:.0f} mm'
-            self._status_txt.set_color('green')
-        self._status_txt.set_text(status)
+        st = self._status_txt
+        if st is not None:
+            if obs == 'back_away':
+                status = f'*** IR: {ir} — BACK AWAY (ToF missed!) ***'
+                st.set_color('red')
+            elif obs == 'replan':
+                status = (
+                    f'ToF: {dist:.0f} mm < {thresh:.0f} mm threshold '
+                    f'— REPLAN TRAJECTORY'
+                )
+                st.set_color('orange')
+            else:
+                status = f'Clear | IR: {ir} | Threshold: {thresh:.0f} mm'
+                st.set_color('green')
+            st.set_text(status)
 
         # CSV streaming log
-        if self._logging and self._log_writer:
+        writer = self._log_writer
+        if self._logging and writer is not None:
             try:
                 ts = datetime.now().isoformat()
                 for ch in range(self._num_ch):
                     g = self._grids[ch]
                     gv = g[~np.isnan(g)]
                     if gv.size > 0:
-                        self._log_writer.writerow([
+                        writer.writerow([
                             ts, ch,
                             f'{np.min(gv):.1f}',
                             f'{np.mean(gv):.1f}',
@@ -372,8 +411,9 @@ class ToFPlotterApp:
             os.makedirs(LOG_DIR, exist_ok=True)
             ts   = datetime.now().strftime('%Y%m%d_%H%M%S')
             path = os.path.join(LOG_DIR, f'tof_{ts}.csv')
-            self._log_file   = open(path, 'w', newline='', buffering=1)
-            self._log_writer = csv.writer(self._log_file)
+            log_f = open(path, 'w', newline='', buffering=1)
+            self._log_file = log_f
+            self._log_writer = csv.writer(log_f)
             self._log_writer.writerow([
                 'timestamp', 'channel', 'min_mm', 'avg_mm', 'max_mm',
                 'ir_label', 'obstacle_response',
@@ -410,7 +450,9 @@ class ToFPlotterApp:
         if self._fig is None:
             return
         try:
-            win = self._fig.canvas.manager.window
+            win = getattr(self._fig.canvas.manager, "window", None)
+            if win is None:
+                return
             try:
                 if win.winfo_ismapped():
                     win.withdraw()
@@ -431,7 +473,7 @@ class ToFPlotterApp:
 
     def _toggle_ind(self, ch: int):
         fig = self._ind_figs[ch]
-        if fig is not None and plt.fignum_exists(fig.number):
+        if fig is not None and plt.fignum_exists(figure_number(fig)):
             plt.close(fig)
             self._ind_figs[ch]  = None
             self._ind_ax_h[ch]  = None

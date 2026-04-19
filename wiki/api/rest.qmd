@@ -1,0 +1,218 @@
+---
+title: "REST API"
+---
+
+The FastAPI backend (`web/backend/app.py`) exposes eighteen REST endpoints plus one WebSocket. Every endpoint returns JSON unless the content type is explicitly noted. Error responses carry a `{"detail": "..."}` body.
+
+## Base URL
+
+Local dev: `http://localhost:8011` (or whatever port you pass to `uvicorn`). In a paired deployment the frontend talks to the same origin and the Vite proxy forwards each route.
+
+Requests that move the real arm (`POST /dsl/run`, `POST /telemetry/tof`, `POST /telemetry/ir`, `POST /mode` with target `hardware`) return `503 Service Unavailable` in demo-mode builds. See the [block editor doc](../dsl/block-editor.qmd) for the demo-mode caveats.
+
+## Health & mode
+
+### `GET /health`
+
+Liveness probe plus backend state snapshot.
+
+```json
+{"ok": true, "backend_open": true, "running": false, "mode": "sim"}
+```
+
+### `GET /mode`
+
+```json
+{"mode": "sim"}
+```
+
+`mode` is `"sim"` or `"hardware"`.
+
+### `POST /mode`
+
+Switch deploy mode.
+
+Request:
+
+```json
+{"mode": "hardware"}
+```
+
+Response:
+
+```json
+{"mode": "hardware"}
+```
+
+In demo mode the request returns 503 with `X-Demo-Reason: Mode switching is disabled in demo mode`.
+
+## URDF
+
+### `GET /urdf`
+
+Returns the Braccio URDF XML. Content type `application/xml`. Demo builds serve the same file out of the SPA's public directory.
+
+## State library
+
+### `GET /states`
+
+```json
+{"states": [{"name": "HOME_REST", "joints": [90, 150, 90, 90, 90, 73], ...}, ...]}
+```
+
+### `GET /states/{name}`
+
+Returns a single `StateEntry`:
+
+```json
+{
+  "name": "HOME_REST",
+  "joints": [90, 150, 90, 90, 90, 73],
+  "theta": 90.0,
+  "r": 125.0,
+  "z": 0.0,
+  "wrist_offset": 0.0,
+  "wrist_rot": 90.0,
+  "gripper": 73.0
+}
+```
+
+404 if the name is not in the library.
+
+### `POST /states/{name}`
+
+Upsert a named pose.
+
+Request body matches `SaveStateRequest`:
+
+```json
+{
+  "joints": [90, 150, 90, 90, 90, 73],
+  "theta": 90.0,
+  "r": 125.0,
+  "z": 0.0,
+  "wrist_offset": 0.0,
+  "wrist_rot": 90.0,
+  "gripper": 73.0
+}
+```
+
+Response: the full `StateEntry` after save.
+
+### `DELETE /states/{name}`
+
+```json
+{"deleted": true}
+```
+
+`deleted` is `false` when the name did not exist.
+
+## Sequences
+
+### `GET /sequences`
+
+```json
+{"sequences": ["demo", "pickup_drop"]}
+```
+
+### `GET /sequences/{name}`
+
+```json
+{"name": "demo", "text": "MOVE HOME_REST WAIT 500\nMOVE STOW_COMPACT WAIT 500\n"}
+```
+
+### `POST /sequences/{name}`
+
+Request:
+
+```json
+{"text": "MOVE HOME_REST WAIT 500\n"}
+```
+
+Response:
+
+```json
+{"ok": true, "errors": []}
+```
+
+Validation runs before save. A non-empty `errors` array means the sequence parsed but failed semantic checks (unknown state names, for example).
+
+### `DELETE /sequences/{name}`
+
+```json
+{"deleted": true}
+```
+
+## DSL run control
+
+### `POST /dsl/validate`
+
+Parses + static-checks a DSL string without running it.
+
+Request: `{"text": "..."}`
+
+Response: `{"ok": true, "errors": []}` or `{"ok": false, "errors": ["line 3: unknown state FOO", ...]}`.
+
+### `POST /dsl/run`
+
+Kicks off asynchronous execution. The running sequence streams status frames on `/ws/telemetry`.
+
+Request: `{"text": "..."}`
+
+Response: `{"started": true, "errors": []}` on success, `{"started": false, "errors": [...]}` if validation failed.
+
+503 in demo mode.
+
+### `POST /dsl/stop`
+
+Stops the current sequence.
+
+Response: `{"stopped": true}`.
+
+### `GET /dsl/status`
+
+Polling endpoint that mirrors the WebSocket `status` frames.
+
+```json
+{
+  "running": true,
+  "line": 4,
+  "kind": "MOVE",
+  "depth": 1,
+  "pass_current": 1,
+  "pass_total": 3,
+  "errors": []
+}
+```
+
+## Telemetry
+
+### `GET /telemetry`
+
+Single-shot snapshot.
+
+```json
+{
+  "type": "telemetry",
+  "joints": [90, 145, 90, 90, 90, 73],
+  "tof": {"0": 412.0, "1": 9999.0, "2": 623.0, "3": 9999.0},
+  "ir": 0,
+  "status": {"running": false}
+}
+```
+
+### `POST /telemetry/tof`
+
+Inject a ToF reading, useful for integration tests.
+
+Request: `{"channel": 0, "distance_mm": 200.0}`
+
+Response: `{"ok": true}`. 503 in demo mode.
+
+### `POST /telemetry/ir`
+
+Inject an IR severity.
+
+Request: `{"severity": 2}`
+
+Response: `{"ok": true}`. 503 in demo mode.

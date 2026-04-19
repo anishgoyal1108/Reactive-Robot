@@ -1,0 +1,48 @@
+---
+title: "Safety Stack"
+---
+
+The `braccio_main_runner/braccio_ctrl/safety/` package is the heart of Reactive Robot. It replaced the legacy `motion_guard.py`, `auto_sweep.py`, `obstacle_map.py`, and `obstacle_memory.py` modules on 2026-04-13.
+
+## Entry points
+
+The `SafetyAPI` class in `api.py` exposes three callers:
+
+- `plan_and_validate(current_q, goal_q) -> PlanResult` for arbitrary joint-space goals.
+- `queue_manual_intent(delta)` for keypress-driven motion; the API applies hysteresis and rate-clamps the request so rapid key presses do not cascade into planner thrash.
+- `queue_sequence(steps)` for DSL sequences; the API drives the cascading replanner when any segment fails.
+
+Every surface of the project funnels through one of these three entry points. The curses controller, the FastAPI bridge, the digital-twin `SimBackend`, and the DSL interpreter all call `SafetyAPI`.
+
+## Behavior tree
+
+`behavior.py` assembles a py-trees root that selects between manual, sweep, and sequence modes on every tick. Mode selection is driven by a blackboard entry that `SafetyAPI` writes when a caller queues work. The tree shares a single `CollisionChecker` and a single `SafetyPlanner` across modes so there is one source of truth for what counts as a colliding pose.
+
+## Hysteresis primitives
+
+`hysteresis.py` exports three primitives the stack uses throughout:
+
+- `SchmittTrigger` gates boolean alarms. Used on IR severity levels and on ToF near-return detection so a transient false positive at the boundary does not flip-flop the replan flag.
+- `EMA` applies an exponential moving average to scalar signals. Used on ToF distance streams when a smoothed estimate drives a rate clamp.
+- `RateClamp` bounds the derivative of a target value. Used on manual-keypress deltas so a held key cannot reach the planner faster than the arm can execute.
+
+## World-model cadence
+
+The world model rebuilds its KDTree on a background thread at 10 Hz, matching the IMU publication rate. Between rebuilds the collision checker uses the last-built KDTree plus a dirty-point list; any point added since the last rebuild is tested against exhaustively and then included in the next rebuild. This keeps freshness high without paying the full KDTree construction cost on every frame.
+
+## Planner and replanner
+
+`SafetyPlanner` is a thin wrapper over `pybullet_planning.birrt` with path smoothing. The distance function weights joint deltas by link length so a change in the base rotation does not incorrectly look equivalent to a change in the wrist.
+
+When a segment fails, `CascadingReplanner` applies strategies in order:
+
+1. **Micro-retreat.** Step back 5 mm along the current link direction and retry.
+2. **Sweep-side flip.** Reflect the goal theta across the sweep midline.
+3. **Z-axis shift.** Try each Z candidate in `SWEEP_Z_CANDIDATES`.
+4. **Nearest-waypoint restart.** Re-plan from the nearest already-validated waypoint.
+5. **Reachability relaxation.** Allow a slightly shorter radial reach.
+6. **Abort.** Raise a `PlanFailed` result the caller can surface to the user.
+
+## Refusal dialog
+
+When the curses controller denies a manual keypress (because the proposed goal collides), `dialog.py` draws a transient overlay showing which link first intersected which point-cloud cluster. The overlay gives the operator enough information to step the arm sideways and retry without opening a log file.

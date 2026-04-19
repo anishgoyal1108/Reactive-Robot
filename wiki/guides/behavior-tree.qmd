@@ -1,0 +1,77 @@
+---
+title: "Behavior Tree Orchestration"
+---
+
+`braccio_main_runner/braccio_ctrl/safety/behavior.py` assembles the py-trees root that sits under `SafetyAPI` and selects what the arm does on each tick.
+
+## Layout
+
+```
+Root (Selector)
+├── ManualIntent branch (Sequence)
+│   ├── HasManualIntent?
+│   ├── ClampAndHysteresis
+│   ├── PlanAndValidate
+│   └── Actuate
+├── SequenceRunner branch (Sequence)
+│   ├── HasActiveSequence?
+│   ├── AdvanceStep
+│   ├── PlanAndValidate
+│   └── Actuate
+├── AutoSweep branch (Sequence)
+│   ├── SweepEnabled?
+│   ├── NextSweepGoal (polar_map lookup)
+│   ├── PlanAndValidate
+│   └── Actuate
+└── Idle
+```
+
+The root is a Selector, so the first branch that ticks `SUCCESS` wins the tick. Priorities are explicit: a manual keypress preempts a sweep, a DSL sequence preempts nothing because sequences run to completion, and the auto-sweep only runs when no other mode has work.
+
+## Blackboard keys
+
+| Key | Writer | Reader | Purpose |
+|-----|--------|--------|---------|
+| `manual_intent` | `SafetyAPI.queue_manual_intent` | ManualIntent branch | Pending delta from keypress. |
+| `sequence_state` | `SafetyAPI.queue_sequence` | SequenceRunner branch | Current sequence cursor + AST. |
+| `sweep_enabled` | Controller `Z` key handler | AutoSweep branch | Boolean. |
+| `last_plan_result` | PlanAndValidate nodes | Telemetry + dialog | Most recent `PlanResult` for status/error display. |
+| `world_dirty` | WorldModel rebuild | Planner cache invalidation | True if the KDTree was rebuilt since last read. |
+
+Every branch writes to and reads from the same blackboard. This is the reason the SafetyAPI chokepoint is load-bearing: without a single writer per key, two branches could race and produce inconsistent plans.
+
+## The PlanAndValidate node
+
+Every branch shares the same `PlanAndValidate` node class, parameterised only by where it gets the goal configuration from. The node:
+
+1. Reads the current joint state.
+2. Reads the goal from its branch-specific source.
+3. Calls `SafetyPlanner.plan(current, goal)`.
+4. If the plan succeeds, writes it into the blackboard.
+5. If the plan fails, hands off to `CascadingReplanner` for up to six retries.
+6. Returns SUCCESS with a plan attached, or FAILURE with a `PlanFailed` result.
+
+Because the planner, the collision checker, and the replanner are shared across branches, there is no way for manual mode to use stricter safety than sweep mode, or vice versa. The guarantees stated in the architecture overview are enforced by having one code path that every motion flows through.
+
+## Adding a new mode
+
+If you need to add a new mode (for example, a teach-repeat recording mode), follow the existing pattern:
+
+1. Create a new branch with a `Sequence` node.
+2. Add a condition node that reads a new blackboard key.
+3. Add an intent-producing node that writes the goal configuration.
+4. Reuse the existing `PlanAndValidate` and `Actuate` nodes.
+5. Insert the branch into the root Selector at the correct priority.
+
+Never write a branch that bypasses `PlanAndValidate`. The chokepoint is the single place the synchronous-safety guarantee holds; skipping it at a branch level re-introduces the bugs that the 2026-04-13 refactor set out to fix.
+
+## Testing
+
+`braccio_main_runner/tests/safety/test_behavior_tree.py` exercises the tree with a fake executor. The test pattern is:
+
+1. Build a `BehaviorTree` with an in-memory fake `SafetyAPI`.
+2. Write values into the blackboard to simulate intents.
+3. Tick the tree.
+4. Assert the expected branch ran and the expected actions were queued on the fake executor.
+
+The tests cover every branch selection path. When you add a new mode, add a test for the new branch's selection, a test for its preemption by higher-priority branches, and a test for its collision-refusal behavior.

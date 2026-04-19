@@ -1,0 +1,54 @@
+---
+title: "Installation"
+---
+
+## Prerequisites
+
+- Python 3.10 or newer.
+- Node.js 18 or newer, required for the web frontend.
+- Arduino IDE or `arduino-cli`, required for flashing the Teensy firmware.
+- A serial-capable machine (Linux, macOS, or Windows with a USB-serial driver).
+
+## Clone the repository
+
+```bash
+git clone https://github.com/anishgoyal1108/Reactive-Robot.git
+cd Reactive-Robot
+```
+
+## Python environment
+
+```bash
+python -m venv .venv
+source .venv/bin/activate              # Windows: .venv\Scripts\activate
+pip install -r braccio_main_runner/requirements.txt
+pip install -r requirements-dev.txt
+```
+
+`requirements.txt` pulls in `pyserial`, `pybullet`, `pybullet-planning`, `py-trees`, `scipy`, `fastapi`, `uvicorn`, `pydantic`, `lark`, `numpy`, and `matplotlib`. `requirements-dev.txt` adds `mypy`, `pytest`, `httpx`, `quartodoc`, and `griffe` for type-checking, tests, and wiki generation.
+
+## Firmware
+
+1. Flash the stock Braccio firmware to the Arduino Mega from the Arduino IDE.
+2. Open `ToF_RR_Sensing/arduino/vl5_tca_4x4/vl5_tca_4x4/vl5_tca_4x4.ino` and flash to the Teensy 4.1.
+
+The Teensy firmware reads four VL53L5CX sensors on a TCA9548A I2C mux, four IR sensors through a NOR-inverter stage on pins 23, 22, 21, 20, and an MPU-6050 IMU. See the [wiring reference](../hardware/wiring.qmd) for the pin map.
+
+## Web frontend
+
+```bash
+cd web/frontend
+npm install
+```
+
+The frontend is a Vite + React + Blockly SPA. `npm run dev` starts a dev server on port 5173 with a proxy to the FastAPI backend; `npm run build` produces a static bundle under `dist/`.
+
+## Verify the install
+
+Run the controller against the digital twin to confirm every dependency resolves:
+
+```bash
+python -m braccio_twin
+```
+
+The process should print a PyBullet banner and the safety stack initialization log, then hold at the sim main loop. Press Ctrl+C to exit.

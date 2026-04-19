@@ -29,13 +29,13 @@ import numpy as np
 class IMUState:
     """Thread-safe shared state for the IMU (accelerometer + gyro + magnetometer)."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._lock = threading.RLock()
 
         # Euler angles (degrees)
-        self.roll_deg:  float = 0.0
+        self.roll_deg: float = 0.0
         self.pitch_deg: float = 0.0
-        self.yaw_deg:   float = 0.0
+        self.yaw_deg: float = 0.0
 
         # Linear acceleration (m/s²)
         self.ax: float = 0.0
@@ -48,32 +48,45 @@ class IMUState:
         self.mz: float = 0.0
 
         # Calibration
-        self.yaw_calibration_offset: float = 0.0   # subtracted from raw yaw
+        self.yaw_calibration_offset: float = 0.0  # subtracted from raw yaw
         self.calibrated: bool = False
 
-        self.last_rx: float = 0.0   # epoch time of last IMU packet
+        self.last_rx: float = 0.0  # epoch time of last IMU packet
         self._rot_cache: np.ndarray | None = None
         self._rot_cache_key: tuple | None = None
 
         # ── Rotation matrix cache ─────────────────────────────────────────────
         # Recomputed only when roll/pitch/yaw actually changes.
-        self._cached_R:     np.ndarray = None
-        self._cached_roll:  float = None
-        self._cached_pitch: float = None
-        self._cached_yaw:   float = None   # calibrated yaw at last compute
+        self._cached_R: np.ndarray | None = None
+        self._cached_roll: float | None = None
+        self._cached_pitch: float | None = None
+        self._cached_yaw: float | None = None  # calibrated yaw at last compute
 
     # ── Public interface ──────────────────────────────────────────────────────
 
-    def update(self, roll: float, pitch: float, yaw: float,
-               ax: float, ay: float, az: float,
-               mx: float, my: float, mz: float) -> None:
+    def update(
+        self,
+        roll: float,
+        pitch: float,
+        yaw: float,
+        ax: float,
+        ay: float,
+        az: float,
+        mx: float,
+        my: float,
+        mz: float,
+    ) -> None:
         """Update all IMU fields atomically (called from serial reader thread)."""
         with self._lock:
-            self.roll_deg  = roll
+            self.roll_deg = roll
             self.pitch_deg = pitch
-            self.yaw_deg   = yaw
-            self.ax = ax;  self.ay = ay;  self.az = az
-            self.mx = mx;  self.my = my;  self.mz = mz
+            self.yaw_deg = yaw
+            self.ax = ax
+            self.ay = ay
+            self.az = az
+            self.mx = mx
+            self.my = my
+            self.mz = mz
             self.last_rx = time.time()
             self._rot_cache = None
             self._rot_cache_key = None
@@ -90,6 +103,24 @@ class IMUState:
             self.calibrated = True
             self._rot_cache = None
             self._rot_cache_key = None
+
+    def wait_for_frame(self, timeout_s: float = 2.0,
+                       poll_interval_s: float = 0.05) -> bool:
+        """Block until ``update()`` has run at least once, or timeout.
+
+        Used by the controller to avoid running an auto-calibration before
+        the IMU serial stream has delivered its first reading. Returns True
+        if a frame arrived in time, False if the timeout elapsed first.
+        Safe to call from the main thread.
+        """
+        deadline = time.time() + float(timeout_s)
+        while time.time() < deadline:
+            with self._lock:
+                if self.last_rx > 0.0:
+                    return True
+            time.sleep(poll_interval_s)
+        with self._lock:
+            return self.last_rx > 0.0
 
     def yaw_relative(self) -> float:
         """
@@ -115,12 +146,14 @@ class IMUState:
         with self._lock:
             yaw = self.yaw_relative() if self.calibrated else self.yaw_deg
             # Return cached matrix if orientation is unchanged
-            if (self._cached_R is not None
-                    and self.roll_deg  == self._cached_roll
-                    and self.pitch_deg == self._cached_pitch
-                    and yaw            == self._cached_yaw):
+            if (
+                self._cached_R is not None
+                and self.roll_deg == self._cached_roll
+                and self.pitch_deg == self._cached_pitch
+                and yaw == self._cached_yaw
+            ):
                 return self._cached_R.copy()
-            roll_deg  = self.roll_deg
+            roll_deg = self.roll_deg
             pitch_deg = self.pitch_deg
 
         # Compute outside the lock — pure math, no shared state reads
@@ -139,23 +172,27 @@ class IMUState:
             [  -sp,            cp*sr,             cp*cr  ],
         ], dtype=np.float64)
         with self._lock:
-            self._cached_R     = result
-            self._cached_roll  = roll_deg
+            self._cached_R = result
+            self._cached_roll = roll_deg
             self._cached_pitch = pitch_deg
-            self._cached_yaw   = yaw
+            self._cached_yaw = yaw
         return result.copy()
 
     def snapshot(self) -> dict:
         """Return a copy of all display-relevant IMU state."""
         with self._lock:
             return {
-                'roll_deg':   self.roll_deg,
-                'pitch_deg':  self.pitch_deg,
-                'yaw_deg':    self.yaw_deg,
-                'yaw_relative': self.yaw_relative(),
-                'ax': self.ax, 'ay': self.ay, 'az': self.az,
-                'mx': self.mx, 'my': self.my, 'mz': self.mz,
-                'calibrated': self.calibrated,
-                'yaw_calibration_offset': self.yaw_calibration_offset,
-                'last_rx': self.last_rx,
+                "roll_deg": self.roll_deg,
+                "pitch_deg": self.pitch_deg,
+                "yaw_deg": self.yaw_deg,
+                "yaw_relative": self.yaw_relative(),
+                "ax": self.ax,
+                "ay": self.ay,
+                "az": self.az,
+                "mx": self.mx,
+                "my": self.my,
+                "mz": self.mz,
+                "calibrated": self.calibrated,
+                "yaw_calibration_offset": self.yaw_calibration_offset,
+                "last_rx": self.last_rx,
             }

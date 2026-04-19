@@ -1,0 +1,46 @@
+---
+title: "Wiring Reference"
+---
+
+## IR NOR-inverter stage
+
+The IR sensors are 5 V active-LOW devices. The Teensy 4.1 is a 3.3 V part with 5 V-tolerant inputs only on specific pins, so every IR signal routes through a TI SN74LVC02A quad NOR gate wired as an inverter and level clamp.
+
+### Wiring
+
+```
+IR sensor out ──┬── NOR gate input A
+                GND ── NOR gate input B (pulls one NOR input low so the gate acts as an inverter)
+NOR VCC ── 3.3 V (clamps the output swing to Teensy-safe levels)
+NOR GND ── GND
+
+NOR output 0 ──> Teensy pin 23
+NOR output 1 ──> Teensy pin 22
+NOR output 2 ──> Teensy pin 21
+NOR output 3 ──> Teensy pin 20
+```
+
+After inversion, every IR channel is **active-HIGH** at the Teensy pin.
+
+### Fail-safe
+
+The firmware enables `INPUT_PULLUP` on pins 23, 22, 21, and 20. If the NOR chip loses power or a trace opens, the pin floats HIGH. The firmware interprets a HIGH signal as "obstacle detected", so a broken sensor fails safe by making the arm act as if the workspace is occupied, not the other way around.
+
+## ToF mux
+
+```
+Teensy SDA/SCL ── TCA9548A ──┬── CH0 ── VL53L5CX (front/side)
+                             ├── CH1 ── VL53L5CX (back/side)
+                             ├── CH2 ── VL53L5CX (top/side)
+                             └── CH3 ── VL53L5CX (bottom)
+```
+
+The Teensy firmware responds to:
+
+- `ACT 4` — activate all four channels.
+- `MUX` — probe the mux.
+- `CH0` through `CH3` — request a frame from a single channel.
+
+## Power budget
+
+Each VL53L5CX peaks around 40 mA during ranging; four sensors at ~35 mA each plus the Teensy 4.1's ~100 mA and the IMU's ~4 mA fit comfortably inside the 500 mA USB power budget. The servo bus is driven separately from a 5 V, 5 A bench supply or battery pack.

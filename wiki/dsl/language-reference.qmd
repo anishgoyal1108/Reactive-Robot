@@ -1,0 +1,140 @@
+---
+title: "Language Reference"
+---
+
+## Grammar
+
+The DSL is defined as a Lark grammar in `braccio_main_runner/braccio_ctrl/dsl/grammar.lark`. The full source is reproduced below.
+
+```lark
+start: statement*
+
+?statement: move_stmt
+          | set_joint_stmt
+          | wait_stmt
+          | home_stmt
+          | repeat_blk
+          | if_blk
+          | while_blk
+          | def_state
+          | def_obstacle
+
+move_stmt: MOVE IDENT (WAIT INT)?
+set_joint_stmt: SET JOINT INT (WAIT INT)?
+wait_stmt: WAIT INT
+home_stmt: HOME
+
+repeat_blk: REPEAT INT LBRACE statement* RBRACE
+if_blk: IF cond LBRACE statement* RBRACE (ELSE LBRACE statement* RBRACE)?
+while_blk: WHILE cond LBRACE statement* RBRACE
+
+cond: sensor_expr CMP SIGNED_NUMBER
+
+?sensor_expr: tof_expr | ir_expr | joint_read_expr
+tof_expr: TOF LBRACK INT RBRACK
+ir_expr: IR
+joint_read_expr: JOINTKW LBRACK JOINT RBRACK
+
+def_state: STATE IDENT LBRACE JOINTS INT INT INT INT INT INT RBRACE
+def_obstacle: OBSTACLE IDENT LBRACE obs_field+ RBRACE
+obs_field: obs_pos | obs_radius | obs_shape
+obs_pos: POS SIGNED_NUMBER SIGNED_NUMBER SIGNED_NUMBER
+obs_radius: RADIUS SIGNED_NUMBER
+obs_shape: SHAPE SHAPE_KIND
+```
+
+## Terminals
+
+| Terminal | Definition |
+|----------|------------|
+| `MOVE`, `SET`, `WAIT`, `HOME` | Statement keywords. |
+| `REPEAT`, `IF`, `ELSE`, `WHILE` | Control-flow keywords. |
+| `STATE`, `OBSTACLE`, `JOINTS`, `POS`, `RADIUS`, `SHAPE` | Definition keywords. |
+| `TOF`, `IR`, `JOINTKW` | Sensor expression heads. |
+| `JOINT` | `WV` / `WR` / `B` / `S` / `E` / `G`. |
+| `SHAPE_KIND` | `BOX` / `SPHERE` / `CYLINDER`. |
+| `CMP` | `<=` / `>=` / `==` / `!=` / `<` / `>`, matched longest-first to avoid ambiguity. |
+| `LBRACE`, `RBRACE`, `LBRACK`, `RBRACK` | `{`, `}`, `[`, `]`. |
+| `IDENT` | `/[A-Z_][A-Z0-9_]*/` at priority -1 so keywords win on equal-length matches. |
+| `INT`, `SIGNED_NUMBER` | Imported from `lark.common`. |
+| `WS` | Whitespace, ignored. |
+| `COMMENT` | `/#[^\n]*/`, ignored. |
+
+## Lexical rules
+
+- Keywords must be uppercase. `move` is not the same as `MOVE`.
+- Identifiers are uppercase only. `HOME_REST` lexes as `IDENT`, not `HOME` followed by `_REST`, because Lark's tokenisation uses longest-match and `IDENT.-1` participates in the match set.
+- Comments consume the rest of the line.
+- Whitespace separates tokens but is otherwise significant only as a delimiter.
+
+## Semantics
+
+### Statement evaluation
+
+The interpreter walks the AST depth-first. Each statement node has a handler in `interpreter.py`:
+
+| Node | Handler | Behavior |
+|------|---------|----------|
+| `MoveStmt` | `_run_move` | Calls `executor.move_to_state(name)` then optional `wait_ms`. |
+| `SetJointStmt` | `_run_set_joint` | Calls `executor.set_joint(joint, deg)` then optional `wait_ms`. |
+| `WaitStmt` | `_run_wait` | Calls `executor.wait_ms(ms)`. |
+| `HomeStmt` | `_run_home` | Calls `executor.go_home()`. |
+| `RepeatBlock` | `_run_repeat` | Iterates `count` times. The outermost REPEAT tracks a pass counter for the status bar. |
+| `IfBlock` | `_run_if` | Evaluates `cond`; runs `then_body` or `else_body`. |
+| `WhileBlock` | `_run_while` | Iterates while `cond` evaluates true, capped at 10 000 iterations. |
+| `DefineState` | `_run_define_state` | Registers a pose with `executor.define_state(name, joints)`. |
+| `DefineObstacle` | `_run_define_obstacle` | Registers an obstacle with `executor.define_obstacle(name, pos, radius, shape)`. |
+
+### Condition evaluation
+
+A `cond` node evaluates its `sensor_expr` and compares the result to a `SIGNED_NUMBER` constant via one of the six `CMP` operators. The comparison uses Python's standard numeric semantics after the sensor expression resolves to a float (for `TOF`) or int (for `IR` and `JOINT`).
+
+### Executor protocol
+
+The interpreter depends on an `Executor` Protocol (defined in `interpreter.py`) with these methods:
+
+```python
+class Executor(Protocol):
+    def move_to_state(self, name: str) -> None: ...
+    def set_joint(self, joint_token: str, deg: int) -> None: ...
+    def go_home(self) -> None: ...
+    def wait_ms(self, ms: int) -> None: ...
+    def read_tof(self, channel: int) -> float: ...
+    def read_ir(self) -> int: ...
+    def read_joint(self, joint_token: str) -> int: ...
+    def define_state(self, name: str, joints: tuple) -> None: ...
+    def define_obstacle(self, name: str, pos: tuple, radius: float, shape: str) -> None: ...
+    def is_stopped(self) -> bool: ...
+```
+
+The controller implements this protocol with calls into `SafetyAPI.queue_sequence`. The `SimBackend` in `braccio_twin` implements the same Protocol against PyBullet. Tests use an in-memory fake executor.
+
+### Stop responsiveness
+
+Every statement handler polls `executor.is_stopped()` after a potentially-blocking call. Long `WAIT` statements internally break into 50 ms poll windows so the `F6` stop key takes effect within one window.
+
+### Safety cap on WHILE
+
+`WhileBlock._run_while` tracks an iteration counter and raises `DslRuntimeError("WHILE exceeded 10000 iterations")` if the counter overflows. The cap exists because a condition that never flips is indistinguishable from a hung sensor, and a hung sensor should not be a runaway.
+
+## Legacy line-based format
+
+The `compat.py` module detects sequences that have no curly braces, no keyword verbs other than `REPEAT`, and where each non-comment line is `<IDENT> <INT>`. Such sequences are rewritten into equivalent DSL before parsing:
+
+```
+# legacy
+HOME_REST 500
+STOW_COMPACT 500
+REPEAT 3
+```
+
+becomes
+
+```
+REPEAT 3 {
+  MOVE HOME_REST WAIT 500
+  MOVE STOW_COMPACT WAIT 500
+}
+```
+
+internally. The legacy format exists so older saved sequences keep running after the DSL rewrite in 2026-04. New sequences should use the extended syntax.

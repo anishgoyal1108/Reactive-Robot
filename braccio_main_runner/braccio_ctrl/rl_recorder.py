@@ -47,7 +47,7 @@ from .ik_solver import reachability, polar_to_cartesian
 log = logging.getLogger(__name__)
 
 # ── Tuning ────────────────────────────────────────────────────────────────────
-RECORD_HZ          = SWEEP_TICK_HZ       # 10 Hz
+RECORD_HZ          = SWEEP_TICK_HZ       # matches BT_TICK_HZ (20 Hz)
 MAX_FILE_BYTES     = 50 * 1024 * 1024    # 50 MB per file
 N_FEEDBACK_STEPS   = 20                  # last N transitions adjusted on +/- key
 OBS_DIM            = 74                  # obs vector length (see module docstring)

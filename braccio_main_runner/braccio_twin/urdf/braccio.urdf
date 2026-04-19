@@ -1,0 +1,373 @@
+<?xml version="1.0"?>
+<!--
+  Minimal Braccio V2 URDF (hand-authored).
+
+  Units: meters (PyBullet convention). Numbers are derived from
+  braccio_ctrl/constants.py: L1 = L2 = 125 mm, L3 = 60 mm. The
+  rigid-body topology matches the real arm; visuals are primitive
+  shapes, not photoreal.
+
+  Frame convention (origin = arm base, sitting on the table):
+    +X forward  (arm points forward at joint_base = 90°)
+    +Y left
+    +Z up
+
+  Joints 0..5 expose the same 6 DOF as the Arduino protocol:
+      joint_base       (revolute Z, 0..180°)
+      joint_shoulder   (revolute Y, 15..165°)
+      joint_elbow      (revolute Y, 0..180°)
+      joint_wrist_vert (revolute Y, 0..180°)
+      joint_wrist_rot  (revolute X, 0..180°)
+      joint_gripper    (prismatic, 10..73° — encoded as mm for the sim)
+
+  The wrist block has 4 fixed child links (one per ToF sensor) whose
+  poses give the ray origin and direction for VirtualToF. Likewise the
+  base has 4 fixed IR-pocket child links for VirtualIR.
+-->
+<robot name="braccio_v2">
+
+  <!-- ========================================================
+       BASE
+       A solid box sitting on the table. The "pockets" for the 4
+       IR sensors are fixed massless child links offset from the
+       base centre.
+       ======================================================== -->
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0.030" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.110 0.110 0.060"/>
+      </geometry>
+      <material name="base_grey">
+        <color rgba="0.25 0.25 0.25 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.030" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.110 0.110 0.060"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin xyz="0 0 0.030"/>
+      <mass value="0.6"/>
+      <inertia ixx="0.0012" ixy="0" ixz="0" iyy="0.0012" iyz="0" izz="0.0012"/>
+    </inertial>
+  </link>
+
+  <!-- ========================================================
+       BASE ROTATION (joint 0)
+       Rotates the whole arm around Z at the top of the base.
+       ======================================================== -->
+  <joint name="joint_base" type="revolute">
+    <parent link="base_link"/>
+    <child link="shoulder_pillar_link"/>
+    <origin xyz="0 0 0.060" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.5708" upper="1.5708" effort="5" velocity="3.14"/>
+  </joint>
+
+  <!-- Small pillar that lifts the shoulder pivot ~10 mm above the
+       rotating disc — gives the IK a stable pivot height. -->
+  <link name="shoulder_pillar_link">
+    <visual>
+      <origin xyz="0 0 0.005" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.035" length="0.010"/>
+      </geometry>
+      <material name="pillar_blue">
+        <color rgba="0.10 0.35 0.75 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.005"/>
+      <geometry>
+        <cylinder radius="0.035" length="0.010"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.05"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
+    </inertial>
+  </link>
+
+  <!-- ========================================================
+       SHOULDER (joint 1)
+       ======================================================== -->
+  <joint name="joint_shoulder" type="revolute">
+    <parent link="shoulder_pillar_link"/>
+    <child link="upper_arm_link"/>
+    <origin xyz="0 0 0.010" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <!-- Braccio servo range 15..165° maps to URDF -2.8798..-0.2618 rad.
+         At Braccio 90° the URDF joint sits at -π/2, which puts the
+         upper arm pointing straight up along +Z. -->
+    <limit lower="-2.8798" upper="-0.2618" effort="5" velocity="3.14"/>
+  </joint>
+
+  <!-- Upper arm: length L1 = 125 mm. The visual cylinder is placed
+       so that its axis goes from the shoulder pivot (local origin)
+       to the elbow pivot (0.125 m along +X in the joint_shoulder
+       zero pose, i.e. arm pointing forward). -->
+  <link name="upper_arm_link">
+    <visual>
+      <origin xyz="0.0625 0 0" rpy="0 1.5708 0"/>
+      <geometry>
+        <cylinder radius="0.018" length="0.125"/>
+      </geometry>
+      <material name="arm_orange">
+        <color rgba="0.85 0.45 0.10 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.0625 0 0" rpy="0 1.5708 0"/>
+      <geometry>
+        <cylinder radius="0.020" length="0.125"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin xyz="0.0625 0 0"/>
+      <mass value="0.10"/>
+      <inertia ixx="5e-5" ixy="0" ixz="0" iyy="5e-5" iyz="0" izz="5e-5"/>
+    </inertial>
+  </link>
+
+  <!-- ========================================================
+       ELBOW (joint 2)
+       ======================================================== -->
+  <joint name="joint_elbow" type="revolute">
+    <parent link="upper_arm_link"/>
+    <child link="forearm_link"/>
+    <origin xyz="0.125 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="0" upper="3.14159" effort="5" velocity="3.14"/>
+  </joint>
+
+  <!-- Forearm: length L2 = 125 mm. -->
+  <link name="forearm_link">
+    <visual>
+      <origin xyz="0.0625 0 0" rpy="0 1.5708 0"/>
+      <geometry>
+        <cylinder radius="0.016" length="0.125"/>
+      </geometry>
+      <material name="arm_orange2">
+        <color rgba="0.90 0.55 0.15 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.0625 0 0" rpy="0 1.5708 0"/>
+      <geometry>
+        <cylinder radius="0.018" length="0.125"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin xyz="0.0625 0 0"/>
+      <mass value="0.08"/>
+      <inertia ixx="4e-5" ixy="0" ixz="0" iyy="4e-5" iyz="0" izz="4e-5"/>
+    </inertial>
+  </link>
+
+  <!-- ========================================================
+       WRIST VERTICAL (joint 3)
+       ======================================================== -->
+  <joint name="joint_wrist_vert" type="revolute">
+    <parent link="forearm_link"/>
+    <child link="wrist_pitch_link"/>
+    <origin xyz="0.125 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <!-- Braccio 0..180° → URDF -π/2..+π/2, centred at 0 for the
+         "wrist aligned with forearm" rest pose. -->
+    <limit lower="-1.5708" upper="1.5708" effort="5" velocity="3.14"/>
+  </joint>
+
+  <link name="wrist_pitch_link">
+    <visual>
+      <origin xyz="0.015 0 0" rpy="0 1.5708 0"/>
+      <geometry>
+        <cylinder radius="0.022" length="0.030"/>
+      </geometry>
+      <material name="wrist_grey">
+        <color rgba="0.20 0.20 0.22 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.015 0 0" rpy="0 1.5708 0"/>
+      <geometry>
+        <cylinder radius="0.024" length="0.030"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin xyz="0.015 0 0"/>
+      <mass value="0.05"/>
+      <inertia ixx="2e-5" ixy="0" ixz="0" iyy="2e-5" iyz="0" izz="2e-5"/>
+    </inertial>
+  </link>
+
+  <!-- ========================================================
+       WRIST ROTATION (joint 4) — rotates about the wrist's own axis
+       (the forearm-aligned +X axis in the wrist_pitch_link frame).
+       ======================================================== -->
+  <joint name="joint_wrist_rot" type="revolute">
+    <parent link="wrist_pitch_link"/>
+    <child link="wrist_roll_link"/>
+    <origin xyz="0.030 0 0" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <!-- Braccio 0..180° → URDF -π/2..+π/2, centred at 0 so the ToF
+         mounts sit in their "canonical" roll orientation at 90°. -->
+    <limit lower="-1.5708" upper="1.5708" effort="5" velocity="3.14"/>
+  </joint>
+
+  <!-- wrist_roll_link is the body the 4 ToF sensors are mounted on.
+       Local frame:
+         +X  along the forearm → forward (sensor "front")
+         +Y  wrist-left        → sensor "left"
+         +Z  wrist-up          → sensor "up"
+  -->
+  <link name="wrist_roll_link">
+    <visual>
+      <origin xyz="0.010 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.030 0.040 0.040"/>
+      </geometry>
+      <material name="wrist_block">
+        <color rgba="0.15 0.15 0.18 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.010 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.030 0.040 0.040"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin xyz="0.010 0 0"/>
+      <mass value="0.04"/>
+      <inertia ixx="2e-5" ixy="0" ixz="0" iyy="2e-5" iyz="0" izz="2e-5"/>
+    </inertial>
+  </link>
+
+  <!-- ========================================================
+       GRIPPER (joint 5)  — prismatic stand-in.
+       On the real arm this is a servo driving a 4-bar linkage. For
+       the sim we only need the tip position (L3 = 60 mm past the
+       wrist_roll_link origin). Joint value is ignored by the
+       controller except for the SET ALL payload.
+       ======================================================== -->
+  <joint name="joint_gripper" type="fixed">
+    <parent link="wrist_roll_link"/>
+    <child link="gripper_link"/>
+    <origin xyz="0.060 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <link name="gripper_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 1.5708 0"/>
+      <geometry>
+        <cylinder radius="0.012" length="0.040"/>
+      </geometry>
+      <material name="gripper_silver">
+        <color rgba="0.70 0.70 0.75 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 1.5708 0"/>
+      <geometry>
+        <cylinder radius="0.014" length="0.040"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.02"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
+    </inertial>
+  </link>
+
+  <!-- ========================================================
+       TOF SENSOR MOUNTS  (4× fixed massless children of wrist_roll)
+       Each link sits on one face of the wrist block. Its +X axis
+       IS the ray direction the sim raycasts along.
+
+       Channel mapping (MUX index → physical direction):
+         CH0 → tof_up_link     (top,    rays point +Z)
+         CH1 → tof_right_link  (right,  rays point -Y)
+         CH2 → tof_left_link   (left,   rays point +Y)
+         CH3 → tof_down_link   (bottom, rays point -Z)
+       ======================================================== -->
+  <joint name="mount_tof_up" type="fixed">
+    <parent link="wrist_roll_link"/>
+    <child link="tof_up_link"/>
+    <origin xyz="0.010 0 0.020" rpy="0 -1.5708 0"/>
+  </joint>
+  <link name="tof_up_link">
+    <inertial><mass value="0.001"/><inertia ixx="1e-8" ixy="0" ixz="0" iyy="1e-8" iyz="0" izz="1e-8"/></inertial>
+  </link>
+
+  <joint name="mount_tof_right" type="fixed">
+    <parent link="wrist_roll_link"/>
+    <child link="tof_right_link"/>
+    <origin xyz="0.010 -0.025 0" rpy="0 0 -1.5708"/>
+  </joint>
+  <link name="tof_right_link">
+    <inertial><mass value="0.001"/><inertia ixx="1e-8" ixy="0" ixz="0" iyy="1e-8" iyz="0" izz="1e-8"/></inertial>
+  </link>
+
+  <joint name="mount_tof_left" type="fixed">
+    <parent link="wrist_roll_link"/>
+    <child link="tof_left_link"/>
+    <origin xyz="0.010 0.025 0" rpy="0 0 1.5708"/>
+  </joint>
+  <link name="tof_left_link">
+    <inertial><mass value="0.001"/><inertia ixx="1e-8" ixy="0" ixz="0" iyy="1e-8" iyz="0" izz="1e-8"/></inertial>
+  </link>
+
+  <joint name="mount_tof_down" type="fixed">
+    <parent link="wrist_roll_link"/>
+    <child link="tof_down_link"/>
+    <origin xyz="0.010 0 -0.020" rpy="0 1.5708 0"/>
+  </joint>
+  <link name="tof_down_link">
+    <inertial><mass value="0.001"/><inertia ixx="1e-8" ixy="0" ixz="0" iyy="1e-8" iyz="0" izz="1e-8"/></inertial>
+  </link>
+
+  <!-- ========================================================
+       IR POCKETS  (4× fixed massless children of base_link)
+       Two on the +Y side, two on the -Y side. Each ray shoots
+       outward (perpendicular to the base side) at the same height
+       as the pocket.
+       ======================================================== -->
+  <joint name="mount_ir_left_front" type="fixed">
+    <parent link="base_link"/>
+    <child link="ir_left_front_link"/>
+    <origin xyz="0.025 0.055 0.035" rpy="0 0 1.5708"/>
+  </joint>
+  <link name="ir_left_front_link">
+    <inertial><mass value="0.001"/><inertia ixx="1e-8" ixy="0" ixz="0" iyy="1e-8" iyz="0" izz="1e-8"/></inertial>
+  </link>
+
+  <joint name="mount_ir_left_back" type="fixed">
+    <parent link="base_link"/>
+    <child link="ir_left_back_link"/>
+    <origin xyz="-0.025 0.055 0.035" rpy="0 0 1.5708"/>
+  </joint>
+  <link name="ir_left_back_link">
+    <inertial><mass value="0.001"/><inertia ixx="1e-8" ixy="0" ixz="0" iyy="1e-8" iyz="0" izz="1e-8"/></inertial>
+  </link>
+
+  <joint name="mount_ir_right_front" type="fixed">
+    <parent link="base_link"/>
+    <child link="ir_right_front_link"/>
+    <origin xyz="0.025 -0.055 0.035" rpy="0 0 -1.5708"/>
+  </joint>
+  <link name="ir_right_front_link">
+    <inertial><mass value="0.001"/><inertia ixx="1e-8" ixy="0" ixz="0" iyy="1e-8" iyz="0" izz="1e-8"/></inertial>
+  </link>
+
+  <joint name="mount_ir_right_back" type="fixed">
+    <parent link="base_link"/>
+    <child link="ir_right_back_link"/>
+    <origin xyz="-0.025 -0.055 0.035" rpy="0 0 -1.5708"/>
+  </joint>
+  <link name="ir_right_back_link">
+    <inertial><mass value="0.001"/><inertia ixx="1e-8" ixy="0" ixz="0" iyy="1e-8" iyz="0" izz="1e-8"/></inertial>
+  </link>
+
+</robot>

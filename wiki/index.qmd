@@ -1,0 +1,66 @@
+---
+title: "Reactive Robot"
+subtitle: "A 6-DOF Braccio V2 arm with synchronous obstacle avoidance, a PyBullet digital twin, and a browser-based block editor."
+format:
+  html:
+    toc: false
+---
+
+::: {.hero}
+The Reactive Robot wiki. Start at the getting-started guide if you are setting up the controller, jump to the DSL reference if you are writing sequences, or open the block editor in your browser for an immediate demo.
+:::
+
+## Explore the wiki
+
+::: {.card-grid}
+[](getting-started/installation.qmd){.card}
+
+### Getting started
+Install Python, flash the Teensy firmware, and bring up the controller or the digital twin.
+
+[](hardware/overview.qmd){.card}
+
+### Hardware
+Component table, sensor mounting, NOR-inverter wiring, and Teensy pin map.
+
+[](architecture/overview.qmd){.card}
+
+### Architecture
+The seven-step pipeline from sensor ingestion through the safety stack to the arm.
+
+[](dsl/commands.qmd){.card}
+
+### DSL command reference
+Every verb, sensor expression, and control-flow construct the language supports.
+
+[](api/rest.qmd){.card}
+
+### API reference
+REST, WebSocket, and auto-generated Python API docs for every backend module.
+
+[](guides/collision-checking.qmd){.card}
+
+### Guides
+Deep dives on collision checking, BiRRT tuning, and behavior-tree orchestration.
+:::
+
+## Try the block editor
+
+The [interactive block editor](editor/index.html) builds Reactive Robot DSL visually. Drag blocks, inspect the generated code, copy it onto a machine running the controller, and press F5 in the curses sequence editor to execute.
+
+## What is Reactive Robot?
+
+Reactive Robot drives a Braccio V2 servo arm through a continuous base sweep from 0° to 180° and back, detecting and avoiding obstacles in real time. Four VL53L5CX 8x8 time-of-flight grids, four IR proximity sensors, and an MPU-6050 IMU fuse into a world-frame point cloud. Every motion request routes through `SafetyAPI.plan_and_validate` before the servos receive a signal.
+
+The codebase ships three integrated surfaces:
+
+1. A curses controller (`python -m braccio_ctrl`) for live operation on real hardware.
+2. A PyBullet digital twin (`python -m braccio_twin`) that runs the same safety stack against virtual sensors.
+3. A FastAPI backend + React + Blockly frontend for browser-based programming.
+
+## Authors
+
+- Anish Goyal [@anishgoyal1108](https://github.com/anishgoyal1108) ([ag29340@georgiasouthern.edu](mailto:ag29340@georgiasouthern.edu))
+- Sebastian Oviedo ([so05798@georgiasouthern.edu](mailto:so05798@georgiasouthern.edu))
+- Ariana Story ([as51527@georgiasouthern.edu](mailto:as51527@georgiasouthern.edu))
+- Elizabeth McGlone ([em18976@georgiasouthern.edu](mailto:em18976@georgiasouthern.edu))

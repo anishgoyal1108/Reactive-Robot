@@ -120,10 +120,13 @@ def main():
 
     for ch in (0, 1):
         fig = plt.figure(figsize=(10, 4))
-        try:
-            fig.canvas.manager.set_window_title("VL53L5CX CH{}".format(ch))
-        except Exception:
-            pass
+        mgr = fig.canvas.manager
+        set_title = getattr(mgr, "set_window_title", None) if mgr else None
+        if callable(set_title):
+            try:
+                set_title("VL53L5CX CH{}".format(ch))
+            except Exception:
+                pass
 
         ax2 = fig.add_subplot(1, 2, 1)
         ax3 = fig.add_subplot(1, 2, 2, projection="3d")

@@ -34,9 +34,20 @@ const uint8_t TOF_MUX_CH[NUM_TOF_SENSORS] = {0, 1, 2, 3};
 uint32_t tfSeqCounter = 0;
 uint32_t imuSeqCounter = 0;
 
-// Four IR obstacle sensors — active LOW (LOW = obstacle detected)
+// Four IR obstacle sensors — active HIGH at the Teensy pin.
+// Hardware path: each EC-Buying OUT1D sensor (active-LOW, 5 V powered) drives
+// one input of a TI SN74LVC02A quad 2-input NOR running at VCC = 3.3 V. The
+// second input of each NOR is tied to GND, so NOR(IR, 0) = NOT(IR) — each
+// gate acts as an inverter that also clamps the signal to a Teensy-safe
+// 3.3 V swing:
+//   IR sensor out 0 V (obstacle)  → NOR drives 3.3 V  → Teensy reads HIGH
+//   IR sensor out 5 V (clear)     → NOR drives 0 V    → Teensy reads LOW
+// INPUT_PULLUP (see setup()) stays enabled as a fail-safe: if the NOR chip
+// is unpowered or the signal trace opens, the Teensy pin floats HIGH and the
+// firmware treats it as an obstacle, halting motion rather than silently
+// missing detections.
 // Mounted 90° apart around the arm base: front, left, back, right
-const int IR_PINS[]              = {2, 3, 4, 5};
+const int IR_PINS[]              = {23, 22, 21, 20};
 const int IR_NUM                 = 4;
 const unsigned long IR_SEND_INTERVAL_MS = 100;
 unsigned long lastIRSend = 0;
@@ -190,12 +201,22 @@ void streamToFFrameV1(uint8_t idx) {
   uint8_t status = 0;
   int d[RES_ZONES];
   int v[RES_ZONES];
+  int s[RES_ZONES];   // VL53L5CX per-zone target_status (0..13)
 
   for (int i = 0; i < RES_ZONES; i++) {
     int mm = (int)results[idx].distance_mm[i];
+    uint8_t ts = (uint8_t)results[idx].target_status[i];
+    // Distance-range validity as the firmware has always done. Per the
+    // VL53L5CX datasheet, target_status 5 and 9 are the "ranging OK"
+    // codes — a normal valid reading. We do NOT fold those into the
+    // validity gate here because that would effectively pass all
+    // valid readings unconditionally, bypassing the mm>40 mm<3000
+    // range check. "Masked / saturated" detection is handled on the
+    // Python side by a whole-frame heuristic (see tof_sensor.py).
     bool valid = (mm > 40 && mm < 3000);
     d[i] = mm;
     v[i] = valid ? 1 : 0;
+    s[i] = (int)ts;
     if (!valid) status |= 0x01;
   }
 
@@ -221,6 +242,13 @@ void streamToFFrameV1(uint8_t idx) {
   for (int i = 0; i < RES_ZONES; i++) {
     Serial.print(",");
     Serial.print(v[i]);
+  }
+  // Per-zone target_status trailing block (new in 2026-04-14 refactor).
+  // Python parser (tof_sensor.py) promotes status==5/9 zones to a close-
+  // obstacle synthetic distance so the safety stack sees them.
+  for (int i = 0; i < RES_ZONES; i++) {
+    Serial.print(",");
+    Serial.print(s[i]);
   }
   Serial.println();
 }
@@ -337,10 +365,12 @@ void readAndSendIR() {
   if (now - lastIRSend < IR_SEND_INTERVAL_MS) return;
   lastIRSend = now;
 
-  // Count how many sensors detect an obstacle (active LOW).
+  // Count how many sensors detect an obstacle. Each IR sensor's active-LOW
+  // output is inverted by a TI SN74LVC02A NOR gate (second input tied to GND),
+  // so a firing sensor pulls the Teensy pin HIGH.
   uint8_t count = 0;
   for (int i = 0; i < IR_NUM; i++) {
-    if (digitalRead(IR_PINS[i]) == LOW) count++;
+    if (digitalRead(IR_PINS[i]) == HIGH) count++;
   }
 
   // Map to 2-bit severity — compatible with existing Python IR parsing.

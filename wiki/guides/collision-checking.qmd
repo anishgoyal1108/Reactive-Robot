@@ -1,0 +1,43 @@
+---
+title: "Collision Checking Deep Dive"
+---
+
+The collision checker (`braccio_main_runner/braccio_ctrl/safety/collision.py`) answers one question on the critical path: is this joint configuration in collision with the current world?
+
+## The capsule model
+
+Each arm link is represented as a capsule: a line segment with a fixed radius. Six capsules cover the Braccio: base, shoulder, elbow, wrist-vertical, wrist-rotation, and the gripper wrist. Capsule dimensions are defined in `safety.fk.LINK_CAPSULES` and measured off the physical arm.
+
+## Point-to-capsule distance
+
+The distance from a world-frame point `p` to a capsule with endpoints `a` and `b` and radius `r` reduces to a closed form:
+
+1. Parameterise the segment as `s(t) = a + t*(b - a)` for `t` in `[0, 1]`.
+2. Compute `t* = clip(((p - a) · (b - a)) / ||b - a||^2, 0, 1)`.
+3. Return `||p - s(t*)|| - r`.
+
+Values above zero are the clearance in millimetres. Values at or below zero mean the point is inside the capsule, which counts as a collision.
+
+## Vectorisation
+
+`capsule_point_cloud_distance(p0, p1, r, cloud)` computes the capsule-to-point distance for an entire Nx3 cloud in one NumPy call. Every step of the closed form is elementwise and broadcasts across the batch dimension. On commodity hardware, evaluating a 1000-point cloud against one capsule takes well under a millisecond.
+
+The BiRRT planner calls this function across six capsules per configuration and typically expands thousands of configurations inside a 2-second planner budget. The per-query cost (low microseconds) is what makes synchronous per-command checks tractable.
+
+## Self-collision
+
+`capsule_capsule_distance(c0, c1)` returns the minimum distance between two capsules using the closed-form line-segment-to-line-segment solution from the reference algorithm on [geomalgorithms.com](http://geomalgorithms.com/a07-_distance.html). The collision checker evaluates every non-adjacent capsule pair on the arm (15 pairs after excluding adjacent links that are structurally joined at a joint).
+
+## Path interpolation
+
+`CollisionChecker.path_in_collision(q0, q1, n_samples)` linearly interpolates joint angles between two configurations and checks each sample. The Arduino's native `Braccio.move()` also interpolates linearly in joint space, so this matches the actual trajectory the arm executes.
+
+The number of samples scales with the largest joint delta along the path. The planner chooses `n_samples` so the end-effector tip never moves more than 5 mm between checks, matching the `SWEEP_COLLISION_RADIUS_MM` clearance sphere.
+
+## Why not polar-space checks?
+
+The legacy `motion_guard` checked collisions in polar coordinates (theta, r, z). The curves connecting polar waypoints do not match the arm's joint-space trajectory, so a polar-space check could clear a path that the arm physically collided through. The 2026-04-13 refactor moved every check into joint space so the checker's answer is the trajectory the arm executes.
+
+## Tuning
+
+`clearance_mm` (constructor argument) is the inflation radius added to every capsule during checking. A larger value trades throughput for safety margin. The default is tuned for the current sensor noise floor and should not be raised without also adjusting the sweep overlap between ToF frames; otherwise the arm refuses to move into an already-observed clear region.

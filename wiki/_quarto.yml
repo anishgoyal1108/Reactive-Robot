@@ -1,0 +1,138 @@
+project:
+  type: website
+  output-dir: _site
+  resources:
+    - "architecture/**/*.svg"
+    - "architecture/**/*.png"
+
+website:
+  title: "Reactive Robot Wiki"
+  description: "Hardware, architecture, DSL reference, and API manual for the Reactive Robot capstone."
+  favicon: ""
+  repo-url: https://github.com/anishgoyal1108/Reactive-Robot
+  repo-actions: [source, issue]
+  page-navigation: true
+  navbar:
+    background: primary
+    left:
+      - href: index.qmd
+        text: Home
+      - href: getting-started/installation.qmd
+        text: Getting Started
+      - href: hardware/overview.qmd
+        text: Hardware
+      - href: architecture/overview.qmd
+        text: Architecture
+      - href: dsl/commands.qmd
+        text: DSL
+      - href: api/rest.qmd
+        text: API
+      - href: guides/collision-checking.qmd
+        text: Guides
+    right:
+      - text: "Block Editor"
+        href: editor/index.html
+      - icon: github
+        href: https://github.com/anishgoyal1108/Reactive-Robot
+  sidebar:
+    style: docked
+    search: true
+    contents:
+      - section: "Getting Started"
+        contents:
+          - getting-started/installation.qmd
+          - getting-started/quickstart.qmd
+      - section: "Hardware"
+        contents:
+          - hardware/overview.qmd
+          - hardware/sensors.qmd
+          - hardware/wiring.qmd
+      - section: "Architecture"
+        contents:
+          - architecture/overview.qmd
+          - architecture/safety-stack.qmd
+          - architecture/world-model.qmd
+      - section: "DSL"
+        contents:
+          - dsl/commands.qmd
+          - dsl/language-reference.qmd
+          - dsl/examples.qmd
+          - dsl/block-editor.qmd
+      - section: "API Reference"
+        contents:
+          - api/rest.qmd
+          - api/websocket.qmd
+          - auto: "api/python"
+      - section: "Guides"
+        contents:
+          - guides/collision-checking.qmd
+          - guides/birrt-tuning.qmd
+          - guides/behavior-tree.qmd
+
+format:
+  html:
+    theme: cosmo
+    css: styles.css
+    toc: true
+    toc-depth: 3
+    code-copy: true
+    code-overflow: wrap
+    code-block-bg: true
+    link-external-icon: true
+    link-external-newwindow: true
+
+quartodoc:
+  package: null
+  dir: api/python
+  title: "Python API"
+  style: pkgdown
+  parser: google
+  sections:
+    - title: "braccio_ctrl"
+      desc: "Main arm controller package."
+      contents:
+        - braccio_ctrl.controller
+        - braccio_ctrl.arm_state
+        - braccio_ctrl.serial_bridge
+        - braccio_ctrl.tof_sensor
+        - braccio_ctrl.imu_state
+        - braccio_ctrl.backends
+        - braccio_ctrl.state_library
+        - braccio_ctrl.session_logger
+        - braccio_ctrl.ik_solver
+    - title: "braccio_ctrl.safety"
+      desc: "Obstacle-aware motion planning."
+      contents:
+        - braccio_ctrl.safety.api
+        - braccio_ctrl.safety.behavior
+        - braccio_ctrl.safety.world_model
+        - braccio_ctrl.safety.planner
+        - braccio_ctrl.safety.collision
+        - braccio_ctrl.safety.replanner
+        - braccio_ctrl.safety.fk
+        - braccio_ctrl.safety.polar_map
+        - braccio_ctrl.safety.pre_scan
+        - braccio_ctrl.safety.hysteresis
+        - braccio_ctrl.safety.dialog
+    - title: "braccio_ctrl.dsl"
+      desc: "Grammar, parser, and interpreter for the Reactive Robot DSL."
+      contents:
+        - braccio_ctrl.dsl.ast_nodes
+        - braccio_ctrl.dsl.parser
+        - braccio_ctrl.dsl.interpreter
+        - braccio_ctrl.dsl.compat
+    - title: "braccio_twin"
+      desc: "PyBullet digital twin."
+      contents:
+        - braccio_twin.sim_backend
+        - braccio_twin.sim_arm
+        - braccio_twin.virtual_tof
+        - braccio_twin.virtual_ir
+        - braccio_twin.virtual_imu
+        - braccio_twin.obstacle_world
+    - title: "web.backend"
+      desc: "FastAPI server bridging the web UI to the controller."
+      contents:
+        - web.backend.app
+        - web.backend.bridge
+        - web.backend.models

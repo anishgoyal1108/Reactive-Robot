@@ -17,6 +17,8 @@ Keyboard shortcuts (focus the plot window):
     1–6     — toggle per-joint pop-out window
 """
 
+from __future__ import annotations
+
 import argparse
 import csv
 import json
@@ -24,14 +26,21 @@ import os
 import socket
 import time
 from collections import deque
+from collections.abc import Iterable
 from datetime import datetime
+from typing import Protocol, TextIO
 
 import numpy as np
 import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
+from matplotlib.text import Text
 
+from braccio_ctrl.mpl_compat import figure_number
 from braccio_ctrl.constants import (
     JOINT_NAMES, JOINT_COLORS, JOINT_LIMITS,
     PLOT_WINDOW_S, PLOT_UPDATE_HZ, PLOT_Y_MARGIN_DEG,
@@ -42,15 +51,26 @@ _LIMIT_COLOR = '#F38BA8'
 _LIMIT_ALPHA = 0.18
 
 
+class _CsvRowWriter(Protocol):
+    def writerow(self, row: Iterable[object]) -> object:
+        ...
+
+
 class ArmPlotterApp:
-    def __init__(self, port: int = ARM_DATA_PORT, window_s: float = PLOT_WINDOW_S):
+    def __init__(
+        self,
+        port: int = ARM_DATA_PORT,
+        window_s: float = PLOT_WINDOW_S,
+    ) -> None:
         self._port     = port
         self._window_s = window_s
         self._t0       = time.monotonic()
 
         maxlen = int(window_s * 20)
-        self._times  = deque(maxlen=maxlen)
-        self._angles = [deque(maxlen=maxlen) for _ in range(6)]
+        self._times: deque[float] = deque(maxlen=maxlen)
+        self._angles: list[deque[float]] = [
+            deque(maxlen=maxlen) for _ in range(6)
+        ]
 
         # UDP socket (non-blocking)
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -59,26 +79,28 @@ class ArmPlotterApp:
         self._sock.setblocking(False)
 
         # CSV logging
-        self._logging    = False
-        self._log_file   = None
-        self._log_writer = None
+        self._logging: bool = False
+        self._log_file: TextIO | None = None
+        self._log_writer: _CsvRowWriter | None = None
 
         # Main figure
-        self._fig   = None
-        self._axes  = []
-        self._lines = []
-        self._status_txt = None
+        self._fig: Figure | None = None
+        self._axes: list[Axes] = []
+        self._lines: list[Line2D] = []
+        self._status_txt: Text | None = None
 
         # Pop-out figures
-        self._ind_figs  = [None] * 6
-        self._ind_axes  = [None] * 6
-        self._ind_lines = [None] * 6
+        self._ind_figs: list[Figure | None] = [None] * 6
+        self._ind_axes: list[Axes | None] = [None] * 6
+        self._ind_lines: list[Line2D | None] = [None] * 6
 
-    def run(self):
+    def run(self) -> None:
         self._build_main_figure()
 
+        fig = self._fig
+        assert fig is not None
         self._anim = FuncAnimation(
-            self._fig, self._update,
+            fig, self._update,
             interval=int(1000 / PLOT_UPDATE_HZ),
             blit=False, cache_frame_data=False,
         )
@@ -166,12 +188,15 @@ class ArmPlotterApp:
             line.set_data(t_data, angles)
             ax.set_xlim(x_min, x_max)
 
-        self._status_txt.set_text('● REC' if self._logging else '')
+        st = self._status_txt
+        if st is not None:
+            st.set_text('● REC' if self._logging else '')
 
         # CSV logging
-        if self._logging and self._log_writer and t_data:
+        writer = self._log_writer
+        if self._logging and writer is not None and t_data:
             try:
-                self._log_writer.writerow(
+                writer.writerow(
                     [f'{t_data[-1]:.4f}'] + [str(a[-1]) for a in a_data if a]
                 )
             except Exception:
@@ -182,9 +207,12 @@ class ArmPlotterApp:
             fig = self._ind_figs[i]
             if fig is None:
                 continue
-            if plt.fignum_exists(fig.number):
-                self._ind_lines[i].set_data(t_data, a_data[i])
-                self._ind_axes[i].set_xlim(x_min, x_max)
+            if plt.fignum_exists(figure_number(fig)):
+                il = self._ind_lines[i]
+                ia = self._ind_axes[i]
+                if il is not None and ia is not None:
+                    il.set_data(t_data, a_data[i])
+                    ia.set_xlim(x_min, x_max)
                 fig.canvas.draw_idle()
             else:
                 self._ind_figs[i]  = None
@@ -232,8 +260,9 @@ class ArmPlotterApp:
             os.makedirs(LOG_DIR, exist_ok=True)
             ts   = datetime.now().strftime('%Y%m%d_%H%M%S')
             path = os.path.join(LOG_DIR, f'braccio_{ts}.csv')
-            self._log_file   = open(path, 'w', newline='', buffering=1)
-            self._log_writer = csv.writer(self._log_file)
+            log_f = open(path, 'w', newline='', buffering=1)
+            self._log_file = log_f
+            self._log_writer = csv.writer(log_f)
             self._log_writer.writerow(
                 ['time_s'] + [n.strip() for n in JOINT_NAMES]
             )
@@ -254,7 +283,9 @@ class ArmPlotterApp:
         if self._fig is None:
             return
         try:
-            win = self._fig.canvas.manager.window
+            win = getattr(self._fig.canvas.manager, "window", None)
+            if win is None:
+                return
             try:
                 if win.winfo_ismapped():
                     win.withdraw()
@@ -275,7 +306,7 @@ class ArmPlotterApp:
 
     def _toggle_ind(self, i: int):
         fig = self._ind_figs[i]
-        if fig is not None and plt.fignum_exists(fig.number):
+        if fig is not None and plt.fignum_exists(figure_number(fig)):
             plt.close(fig)
             self._ind_figs[i]  = None
             self._ind_axes[i]  = None

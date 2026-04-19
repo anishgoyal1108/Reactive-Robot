@@ -1,0 +1,65 @@
+---
+title: "Block Editor"
+---
+
+The Blockly editor at `/Reactive-Robot/editor/` emits DSL text as you build visual programs. Every block has a direct mapping to a grammar rule; this page is the correspondence table.
+
+## Movement blocks
+
+| Block | Label | DSL output |
+|-------|-------|------------|
+| `braccio_move` | move to state … wait … ms | `MOVE <NAME>` or `MOVE <NAME> WAIT <ms>` |
+| `braccio_set_joint` | set joint … to … ° wait … ms | `SET <J> <deg>` or `SET <J> <deg> WAIT <ms>` |
+| `braccio_wait` | wait … ms | `WAIT <ms>` |
+| `braccio_home` | go home | `HOME` |
+
+`WAIT 0` is suppressed in the generated text so idle moves do not emit meaningless trailing clauses.
+
+## Control flow blocks
+
+| Block | Label | DSL output |
+|-------|-------|------------|
+| `braccio_repeat` | repeat … times | `REPEAT <n> { ... }` |
+| `braccio_if` | if … then … | `IF <cond> { ... }` |
+| `braccio_if_else` | if … then … else … | `IF <cond> { ... } ELSE { ... }` |
+| `braccio_while` | while … do … | `WHILE <cond> { ... }` |
+
+Nested blocks indent by two spaces per level. The generator's `indent()` helper handles this so nested bodies read the same way the curses editor renders them.
+
+## Condition value blocks
+
+The `IF` and `WHILE` blocks accept a value input typed as `Condition`. Three blocks produce that type:
+
+| Block | Label | DSL output |
+|-------|-------|------------|
+| `braccio_cond_tof` | ToF … … … mm | `TOF[<ch>] <cmp> <val>` |
+| `braccio_cond_ir` | IR … … | `IR <cmp> <val>` |
+| `braccio_cond_joint` | joint … … … ° | `JOINT[<j>] <cmp> <val>` |
+
+## Definition blocks
+
+| Block | Label | DSL output |
+|-------|-------|------------|
+| `braccio_define_state` | define state … B … S … E … WV … WR … G … | `STATE <NAME> { JOINTS <b> <s> <e> <wv> <wr> <g> }` |
+| `braccio_define_obstacle` | define obstacle … position x … y … z … (mm) radius … mm shape … | `OBSTACLE <NAME> { POS <x> <y> <z> RADIUS <r> SHAPE <kind> }` |
+
+The obstacle block is hidden from the toolbox in hardware mode because the backend no-ops it. In demo mode and in sim mode the block is available.
+
+## Dropdown values
+
+| Field | Values |
+|-------|--------|
+| `JOINT` | base, shoulder, elbow, wrist vert, wrist rot, gripper. |
+| `CMP` | `<`, `<=`, `=`, `!=`, `>=`, `>`. (`=` emits as `==`.) |
+| `TOF_CHANNEL` | CH0 (front), CH1 (back), CH2 (top), CH3 (floor). |
+| `SHAPE` | box, sphere, cylinder. |
+| `STATE_NAME` | Populated at runtime from the `/states` endpoint. Defaults to `["HOME"]` when the endpoint is unreachable. |
+
+## Demo mode behavior
+
+When the bundle is built with `VITE_DEMO_MODE=true`:
+
+- The Run button is replaced by a **Copy DSL** button. Clicking it writes the current DSL text to the clipboard.
+- Validate still runs, but in demo mode it always returns OK because Blockly emits grammar-correct text by construction.
+- `/states` and `/sequences` round-trip through `localStorage`, so named poses and saved sequences persist across page reloads.
+- The hardware-mode toggle is hidden; the deploy mode is always "sim" in demo builds.

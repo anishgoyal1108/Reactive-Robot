@@ -1,0 +1,67 @@
+---
+title: "WebSocket API"
+---
+
+## `/ws/telemetry`
+
+A single WebSocket endpoint at `/ws/telemetry` carries live telemetry and run-status updates. The frontend's `startTelemetry()` function in `web/frontend/src/state/telemetry.ts` is the reference client.
+
+## Connection
+
+Upgrade to WebSocket on `/ws/telemetry`. No subprotocol, no handshake payload. The server sends frames at up to 30 Hz (`_WS_HZ = 30.0` in `web/backend/app.py`). The connection stays open until the client drops or the process exits.
+
+## Frame format
+
+Every frame is UTF-8 JSON. There are two frame types, distinguished by the `type` field.
+
+### Telemetry frame
+
+Sent on every sensor tick.
+
+```json
+{
+  "type": "telemetry",
+  "joints": [90, 145, 90, 90, 90, 73],
+  "tof": {"0": 412.0, "1": 9999.0, "2": 623.0, "3": 9999.0},
+  "ir": 0,
+  "status": {"running": false}
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `joints` | `int[6]` | Current servo angles for B, S, E, WV, WR, G. |
+| `tof` | `{"0"-"3": float}` | Minimum valid distance in millimetres per channel. `9999` is the sentinel for "no valid near-return". |
+| `ir` | `int` | IR severity, 0 to 3. |
+| `status` | `object` | Latest run status summary. Mirrors the `GET /dsl/status` payload. |
+
+### Status frame
+
+Sent whenever the running sequence advances a step, enters or exits a loop pass, or halts.
+
+```json
+{
+  "type": "status",
+  "line": 4,
+  "kind": "MOVE",
+  "depth": 1,
+  "pass_current": 1,
+  "pass_total": 3
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `line` | `int` | 1-based source line in the DSL text. |
+| `kind` | `string` | AST node kind, for example `MOVE`, `REPEAT`, `WHILE`. |
+| `depth` | `int` | Nesting depth (0 at the outermost level). |
+| `pass_current` | `int` | Current pass inside the outermost REPEAT. |
+| `pass_total` | `int` | Total passes planned by the outermost REPEAT. |
+
+## Reconnect
+
+The reference client reconnects on close with exponential backoff starting at 500 ms and capping at 10 s. The server does not track clients across reconnects; every reconnect is a fresh subscription.
+
+## Demo mode
+
+The WebSocket is disabled in demo builds. The frontend's `startTelemetry()` short-circuits before opening a socket when `isDemoMode()` returns true, so the console stays quiet and the SPA does not retry every 500 ms forever.

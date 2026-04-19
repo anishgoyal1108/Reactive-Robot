@@ -27,11 +27,11 @@ from .constants import (
 
 
 class ArmState:
-    def __init__(self):
+    def __init__(self) -> None:
         self._lock = threading.RLock()   # RLock: re-entrant, prevents nested deadlock
 
         # ── Joint angles (degrees) — shadowed from commands sent ──────────
-        self.joints: list = list(HOME_POS)
+        self.joints: list[float] = [float(x) for x in HOME_POS]
 
         # ── IK polar coordinates ──────────────────────────────────────────
         self.theta: float = DEFAULT_THETA   # base servo angle, 0–180°

@@ -1,0 +1,571 @@
+:root {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: #e6e6e6;
+  background: #111418;
+  -webkit-font-smoothing: antialiased;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+.app-shell {
+  display: grid;
+  /* Left column width is overridden from App.tsx via inline style so
+     the drag handle + collapse toggle can drive it dynamically. The
+     static value here is only the fallback for the initial paint. */
+  grid-template-columns: 480px 1fr 280px;
+  grid-template-rows: 48px 1fr;
+  height: 100vh;
+  width: 100vw;
+  grid-template-areas:
+    "topbar topbar topbar"
+    "left viewer right";
+}
+
+.app-shell__topbar {
+  grid-area: topbar;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  background: #191d24;
+  border-bottom: 1px solid #252a33;
+  font-weight: 600;
+}
+
+.app-shell__topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.topbar-toggle {
+  background: #1f2937;
+  color: #e6e6e6;
+  border: 1px solid #374151;
+  border-radius: 4px;
+  padding: 2px 10px;
+  font-size: 16px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.topbar-toggle:hover {
+  background: #2b3442;
+}
+
+.app-shell__left {
+  grid-area: left;
+  border-right: 1px solid #252a33;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.app-shell__left--collapsed {
+  /* Grid column is already 0 wide; belt-and-braces so Blockly can't
+     catch stray pointer events while it's hidden. */
+  visibility: hidden;
+}
+
+.app-shell__resize-handle {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  bottom: 0;
+  width: 6px;
+  cursor: ew-resize;
+  background: transparent;
+  z-index: 20;
+  touch-action: none;
+}
+
+.app-shell__resize-handle:hover,
+.app-shell__resize-handle:active {
+  background: rgba(59, 130, 246, 0.35);
+}
+
+.app-shell__left-header {
+  padding: 8px 12px;
+  border-bottom: 1px solid #252a33;
+  background: #131720;
+}
+
+.app-shell__left-workspace {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+}
+
+.blockly-workspace {
+  width: 100%;
+  height: 100%;
+}
+
+.run-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.run-controls button {
+  background: #1f2937;
+  color: #e6e6e6;
+  border: 1px solid #374151;
+  border-radius: 4px;
+  padding: 4px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.run-controls button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.run-controls button:hover:not(:disabled) {
+  background: #2b3442;
+}
+
+.run-controls__error {
+  color: #ef4444;
+  font-size: 12px;
+}
+
+.run-controls__validation.ok {
+  color: #22c55e;
+  font-size: 12px;
+}
+
+.run-controls__validation.bad {
+  color: #facc15;
+  font-size: 12px;
+}
+
+.manual-joint-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 16px;
+}
+
+.manual-joint-row {
+  display: grid;
+  grid-template-columns: 36px 1fr 44px;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.manual-joint-row input[type="range"] {
+  width: 100%;
+}
+
+.manual-joint-name {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.manual-joint-name input {
+  flex: 1;
+  background: #0f141b;
+  color: #e6e6e6;
+  border: 1px solid #374151;
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+
+.manual-joint-panel button {
+  margin-top: 6px;
+  background: #1d4ed8;
+  color: #fff;
+  border: 0;
+  border-radius: 4px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.manual-joint-panel button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.manual-joint-error {
+  color: #ef4444;
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.manual-joint-message {
+  color: #22c55e;
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.recorder-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #252a33;
+}
+
+.recorder-panel__row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.recorder-panel__row button {
+  background: #1f2937;
+  color: #e6e6e6;
+  border: 1px solid #374151;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.recorder-panel__row button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.recorder-panel__row button:hover:not(:disabled) {
+  background: #2b3442;
+}
+
+.recorder-panel__status {
+  font-size: 12px;
+  color: #d1d5db;
+  font-variant-numeric: tabular-nums;
+}
+
+.recorder-panel__error {
+  color: #ef4444;
+  font-size: 12px;
+}
+
+.app-shell__viewer {
+  grid-area: viewer;
+  position: relative;
+  background: radial-gradient(circle at center, #1a1f27 0%, #0c0f13 80%);
+}
+
+.app-shell__right {
+  grid-area: right;
+  border-left: 1px solid #252a33;
+  overflow: auto;
+  padding: 12px;
+  font-size: 13px;
+}
+
+.status-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+.status-dot--ok {
+  background: #22c55e;
+}
+
+.status-dot--bad {
+  background: #ef4444;
+}
+
+.status-dot--warn {
+  background: #facc15;
+}
+
+.panel-heading {
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: #9ca3af;
+  margin: 12px 0 6px 0;
+}
+
+.joint-row {
+  display: flex;
+  justify-content: space-between;
+  font-variant-numeric: tabular-nums;
+  padding: 2px 0;
+}
+
+/* ── Phase 7: deploy-mode banner + confirmation modal ── */
+
+.mode-banner {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  border: 1px solid #374151;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  color: #e6e6e6;
+  background: #1f2937;
+}
+
+.mode-banner:hover {
+  background: #2b3442;
+}
+
+.mode-banner--sim {
+  background: #0f2e1f;
+  border-color: #1f5f3b;
+  color: #86efac;
+}
+
+.mode-banner--sim:hover {
+  background: #164b30;
+}
+
+.mode-banner--hardware {
+  background: #3a1e0a;
+  border-color: #a34a17;
+  color: #fcd34d;
+  animation: mode-banner-pulse 2.2s ease-in-out infinite;
+}
+
+.mode-banner--hardware:hover {
+  background: #4d2a10;
+}
+
+@keyframes mode-banner-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(250, 204, 21, 0);
+  }
+  50% {
+    box-shadow: 0 0 0 3px rgba(250, 204, 21, 0.18);
+  }
+}
+
+.mode-banner__switch {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  opacity: 0.75;
+  padding-left: 6px;
+  border-left: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal {
+  background: #151a22;
+  border: 1px solid #374151;
+  border-radius: 6px;
+  max-width: 440px;
+  width: 90%;
+  padding: 18px 20px;
+  color: #e6e6e6;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+}
+
+.modal__title {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
+.modal__body {
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.modal__body p {
+  margin: 0 0 8px 0;
+}
+
+.modal__body code {
+  background: #0b0f16;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+.modal__warn {
+  background: #2a1803;
+  border: 1px solid #a34a17;
+  border-radius: 4px;
+  padding: 8px 10px;
+  color: #fcd34d;
+  margin-top: 6px;
+}
+
+.modal__error {
+  background: #2a0a0a;
+  border: 1px solid #7f1d1d;
+  border-radius: 4px;
+  padding: 6px 10px;
+  color: #fca5a5;
+  font-size: 12px;
+  margin-top: 8px;
+}
+
+.modal__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.modal__actions button {
+  background: #1f2937;
+  color: #e6e6e6;
+  border: 1px solid #374151;
+  border-radius: 4px;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.modal__actions button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.modal__actions button:hover:not(:disabled) {
+  background: #2b3442;
+}
+
+.modal__confirm--danger {
+  background: #7f1d1d;
+  border-color: #b91c1c;
+}
+
+.modal__confirm--danger:hover:not(:disabled) {
+  background: #991b1b;
+}
+
+/* ── Blockly dark-theme overrides ─────────────────────────────────
+   The built-in Classic theme renders the toolbox with dark grey
+   category labels on slightly lighter grey — on our dark app chrome
+   that's close to unreadable. Override the tree row + label colours
+   directly so the category names pop against the sidebar background.
+   These class names are stable across Blockly v10/v11. */
+
+.blocklyToolboxDiv,
+.blocklyToolbox {
+  background-color: #131720 !important;
+  border-right: 1px solid #252a33 !important;
+  padding-top: 6px !important;
+}
+
+.blocklyTreeRow {
+  padding: 6px 10px !important;
+  margin: 2px 4px !important;
+  border-radius: 4px !important;
+  height: auto !important;
+  line-height: 22px !important;
+}
+
+.blocklyTreeRow:not(.blocklyTreeSelected):hover {
+  background-color: #1f2937 !important;
+}
+
+.blocklyTreeSelected {
+  background-color: #1d4ed8 !important;
+}
+
+.blocklyTreeLabel {
+  color: #f3f4f6 !important;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    Roboto, sans-serif !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  padding-left: 6px !important;
+}
+
+.blocklyTreeSelected .blocklyTreeLabel {
+  color: #ffffff !important;
+}
+
+/* The small colour swatch Blockly draws before each category label.
+   Bump it up so it reads as a tag, not a line. */
+.blocklyTreeRow .blocklyTreeIcon {
+  width: 6px !important;
+  border-radius: 2px !important;
+  margin-right: 4px !important;
+}
+
+/* Flyout (the panel that pops out when a category is clicked). */
+.blocklyFlyout {
+  background-color: #0f141b !important;
+}
+
+.blocklyFlyoutBackground {
+  fill: #0f141b !important;
+  fill-opacity: 0.98 !important;
+}
+
+.blocklyFlyoutScrollbar .blocklyScrollbarHandle {
+  fill: #374151 !important;
+}
+
+/* Main workspace background under the blocks. */
+.blocklyMainBackground {
+  stroke: #252a33 !important;
+}
+
+/* Demo mode — banner rendered above the topbar when the bundle was
+   built for GitHub Pages. The banner pushes the grid down by one row
+   by living outside the grid-template-areas definition. */
+.demo-banner {
+  padding: 8px 16px;
+  background: #3a2f1a;
+  border-bottom: 1px solid #6b4f16;
+  color: #f6e1a6;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.demo-banner__link {
+  color: #ffd37a;
+  text-decoration: underline;
+}
+
+.demo-banner__link:hover {
+  color: #ffe8b0;
+}
+
+/* Copy-DSL button replaces the Run/Stop pair in demo mode. */
+.run-controls__copy {
+  background: #1f3f2a !important;
+  border-color: #2f6344 !important;
+  color: #b9f2c9 !important;
+}
+
+.run-controls__copy:disabled {
+  opacity: 0.5;
+}
+

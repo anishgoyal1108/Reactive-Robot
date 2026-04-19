@@ -3,8 +3,21 @@ rl_reward.py — Reward function for the Braccio RL policy.
 
 Operates on observation vectors produced by `rl_recorder._encode_obs` (74
 floats, see that module's docstring for the layout).  All reward terms sum
-each tick (100 ms at SWEEP_TICK_HZ).  Designed to be cheap enough to call
-inline in the online training loop.
+each tick at SWEEP_TICK_HZ.  Designed to be cheap enough to call inline in
+the online training loop.
+
+Seven terms (mode-agnostic — valid for sweep, sequence-editor, and hardware):
+  1. Goal progress         — reward forward motion toward goal
+  2. Waypoint reached      — bonus when goal dist crosses threshold
+  3. Collision / IR        — hard penalty on IR DANGER (NOR-gate: 0 or 3 only)
+  4. Proximity shaping     — soft quadratic ramp as ToF closes in
+  5. Speed cost            — quadratic penalty on action magnitude
+  6. Proximity speed limit — extra penalty for fast motion near obstacles
+  7. Jerk                  — penalise sudden direction/speed changes
+
+Term 8 (holding penalty) was removed: it punished near-zero action when the
+goal was far, but the sequence editor legitimately holds at waypoints during
+wait_ms.  Goal progress (term 1) already penalises stalling implicitly.
 
 Three ways to use this module
 -----------------------------
@@ -72,10 +85,6 @@ SPEED_LIMIT_GAIN     = 1.00
 
 JERK_GAIN_THETA      = 0.02    # |Δaction[0]|
 JERK_GAIN_Z          = 0.01
-
-HOLD_PENALTY         = 0.05    # near-zero motion while goal far
-HOLD_ACTION_THRESH   = 0.05
-HOLD_GOAL_THRESH     = 0.20
 
 
 # ── Helpers: un-normalise obs fields ────────────────────────────────────────
@@ -195,10 +204,6 @@ def compute_reward(obs:          np.ndarray,
         p0, p1 = float(prev_action_n[0]), float(prev_action_n[1])
         r -= JERK_GAIN_THETA * abs(a0 - p0)
         r -= JERK_GAIN_Z     * abs(a1 - p1)
-
-    # ── 8. Holding penalty (stationary while goal far) ───────────────────
-    if abs(a0) < HOLD_ACTION_THRESH and dist_after > HOLD_GOAL_THRESH:
-        r -= HOLD_PENALTY
 
     return float(r)
 

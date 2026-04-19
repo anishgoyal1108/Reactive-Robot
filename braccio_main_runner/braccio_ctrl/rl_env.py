@@ -7,6 +7,8 @@ Two concrete subclasses implement this interface:
 
 Observation space : Box(-2.0, +2.0, shape=(74,), dtype=float32)
   Layout is identical to rl_recorder._encode_obs (see that module's docstring).
+  obs[3] = dir_to_goal = sign(goal_theta - theta) ∈ {-1, 0, +1}.
+  Sweep mode is a special case: goals alternate between 0° and 180°.
 
 Action space : Box(-1.0, +1.0, shape=(3,), dtype=float32)
   [0] Δtheta  normalised  (+1.0 == one THETA_STEP° in the forward direction)
@@ -16,7 +18,9 @@ Action space : Box(-1.0, +1.0, shape=(3,), dtype=float32)
   Raw (physical) deltas:  use denormalize_action() to convert back.
   Normalised actions:     pass directly to compute_reward().
 
-Reward function: rl_reward.compute_reward() — 8 terms, same for sim + hardware.
+Reward function: rl_reward.compute_reward() — 7 terms, same for sim + hardware.
+  Mode-agnostic: no sweep-specific terms.  Hold behaviour during sequence-editor
+  wait_ms is handled outside the policy by SequenceRLRunner.
 
 Episode termination:
   terminated = IR DANGER (ir_bits >= 3) — collision
@@ -200,12 +204,13 @@ class BraccioBaseEnv(gym.Env):
 
         Returns
         -------
-        dict with keys 'theta' (deg), 'r' (mm), 'z' (mm), 'direction', 'delta'
+        dict with keys 'theta' (deg), 'r' (mm), 'z' (mm), 'dir_to_goal', 'delta'
+          dir_to_goal : sign(goal_theta - theta) ∈ {-1, 0, +1}
         """
         return {
-            'theta':     float((obs[0] + 1.0) * 90.0),
-            'r':         float(obs[1] * 115.0 + 125.0),
-            'z':         float(obs[2] * 125.0),
-            'direction': float(obs[3]),
-            'delta':     float((obs[4] + 1.0) * 3.0),
+            'theta':       float((obs[0] + 1.0) * 90.0),
+            'r':           float(obs[1] * 115.0 + 125.0),
+            'z':           float(obs[2] * 125.0),
+            'dir_to_goal': float(obs[3]),   # {-1, 0, +1}
+            'delta':       float((obs[4] + 1.0) * 3.0),
         }

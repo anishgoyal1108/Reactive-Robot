@@ -6,7 +6,9 @@ tuples at SWEEP_TICK_HZ in a daemon thread.  Data is flushed to a compressed
 NPZ file at shutdown (or when the 50 MB cap is hit, triggering log rotation).
 
 Observation vector layout (74 floats, all float32):
-  [0:5]   arm pose — theta/90-1, (r-125)/115, z/125, direction, delta/3-1
+  [0:5]   arm pose — theta/90-1, (r-125)/115, z/125, dir_to_goal, delta/3-1
+            dir_to_goal = sign(goal_theta - theta): {-1, 0, +1}
+            Mode-agnostic: sweep is just goals=[0°,180°] repeated.
   [5:21]  CH0 ToF grid flattened (4×4=16), NaN→1.0, clipped to [0,2]×(1/250mm)
   [21:37] CH1 ToF grid flattened, same normalisation
   [37:53] CH2 ToF grid flattened, clipped to [0,2]×(1/50mm)
@@ -18,8 +20,10 @@ Observation vector layout (74 floats, all float32):
   [70:74] forbidden theta-band summary: f_min/90-1, f_max/90-1, f_span/180,
           mem_ahead (lookahead voxel-memory occupancy flag)
 
-NOTE: the plan's "73 floats" count was a documentation error (the breakdown
-it lists actually sums to 74). This module uses 74 consistently.
+NOTE: obs[3] was previously the sweep `direction` flag ({-1,+1}), which was
+sweep-mode-specific and meaningless in sequence-editor mode.  It is now
+`dir_to_goal` = np.sign(goal_theta - theta), which is universally valid for
+any goal (sweep goals and named-state waypoints alike).  OBS_DIM stays 74.
 
 Action vector (3 floats):
   [0] Δtheta  (degrees, raw)
@@ -65,12 +69,13 @@ def _encode_obs(arm_snap: dict, tof_snap: dict, obs_snap: dict,
       obstacle_map : ObstacleMap — used for get_obstacle_thetas(),
                      memory_occupied_thetas(), memory_occupied_near()
       sweeper      : AutoSweeper — used for _is_position_clear() in
-                     Z-level mask; also supplies direction if it isn't
-                     passed explicitly (falls back to `direction` arg)
+                     Z-level mask.
       goal_state   : dict with 'theta', 'r', 'z' (absolute target pose).
-                     When None, goal delta is zeros → means "at goal /
-                     no active goal" which matches the sweep scenario
-                     where the arm has no named target.
+                     When None, goal delta and dir_to_goal are zeros,
+                     meaning "no active goal / at goal already".
+
+    The `direction` arg is kept for the lookahead voxel check only;
+    it is no longer placed in the obs vector.  obs[3] is now dir_to_goal.
     """
     theta = arm_snap.get('theta', 90.0)
     r     = arm_snap.get('r',     152.0)
@@ -81,6 +86,14 @@ def _encode_obs(arm_snap: dict, tof_snap: dict, obs_snap: dict,
     r_n      = (r - 125.0) / 115.0
     z_n      = z / 125.0
     delta_n  = delta / 3.0 - 1.0
+
+    # dir_to_goal replaces the old sweep `direction` flag.
+    # Computed here so we can use goal_theta before the goal_delt block.
+    if goal_state is not None:
+        gt = float(goal_state.get('theta', theta))
+        dir_to_goal = float(np.sign(gt - theta))   # {-1, 0, +1}
+    else:
+        dir_to_goal = 0.0   # no active goal → no directional preference
 
     grids = tof_snap.get('grids', [None, None, None, None])
 
@@ -133,7 +146,7 @@ def _encode_obs(arm_snap: dict, tof_snap: dict, obs_snap: dict,
 
     # ── Goal delta (3) ─────────────────────────────────────────────────
     if goal_state is not None:
-        gt = float(goal_state.get('theta', theta))
+        gt = float(goal_state.get('theta', theta))   # already used above for dir_to_goal
         gr = float(goal_state.get('r',     r))
         gz = float(goal_state.get('z',     z))
         goal_delt = np.array([
@@ -173,7 +186,7 @@ def _encode_obs(arm_snap: dict, tof_snap: dict, obs_snap: dict,
     forbidden = np.array([f_min, f_max, f_span, mem_ahead], dtype=np.float32)
 
     return np.concatenate([
-        [theta_n, r_n, z_n, direction, delta_n],
+        [theta_n, r_n, z_n, dir_to_goal, delta_n],
         ch0, ch1, ch2,
         [ir_n],
         obs_feat,
@@ -289,7 +302,8 @@ class RLRecorder:
         z     = arm_snap['z']
         delta = arm_snap['delta']
 
-        # Pull direction from sweeper status when available; +1 by default.
+        # direction is used only for the voxel-memory lookahead in _encode_obs;
+        # it no longer appears in the obs vector (obs[3] is now dir_to_goal).
         direction = 1.0
         if self._sweeper is not None:
             try:

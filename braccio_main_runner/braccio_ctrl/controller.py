@@ -626,17 +626,24 @@ class BraccioController:
             rtype = resp.get("type", "unknown")
             with self._state._lock:
                 if rtype == "pos":
-                    # Sync joints AND IK polar state from Arduino's actual angles.
-                    # Without this, the first keypress after startup computes IK
-                    # from the stale software default (r=152, z=-50) rather than
-                    # the arm's real position, causing a violent unexpected move.
+                    # Always shadow joints from Arduino. Polar (theta/r/z) is
+                    # synced exactly once — the first POS after startup — so
+                    # the first keypress doesn't compute IK from the stale
+                    # software defaults (r=152, z=-50). After that the polar
+                    # state is user-authoritative; re-deriving it from every
+                    # POS would leak IK integer-rounding drift back into the
+                    # commanded values (right-arrow slowly dropping z, etc.).
                     positions = list(resp["positions"])
-                    theta, r, z = fk_polar(positions)
                     self._state.joints = positions
-                    self._state.theta = theta
-                    self._state.r = r
-                    self._state.z = z
-                    self._state.last_resp = "POS synced"
+                    if not self._state.polar_synced:
+                        theta, r, z = fk_polar(positions)
+                        self._state.theta = theta
+                        self._state.r = r
+                        self._state.z = z
+                        self._state.polar_synced = True
+                        self._state.last_resp = "POS synced"
+                    else:
+                        self._state.last_resp = "POS"
                     self._state.last_error = ""
                 elif rtype == "error":
                     self._state.last_error = resp.get("message", "")

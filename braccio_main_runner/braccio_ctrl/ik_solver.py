@@ -206,31 +206,3 @@ def reachability(theta_deg: float, r_mm: float, z_mm: float) -> str:
     if dist < abs(L1 - L2):
         return 'too_close'
     return 'ok'
-
-
-def fk_polar(joints: list) -> tuple[float, float, float]:
-    """
-    Approximate forward kinematics inverse of solve_ik() in polar space.
-
-    Parameters
-    ----------
-    joints : [base, shoulder, elbow, wristV, wristR, gripper]
-
-    Returns
-    -------
-    (theta_deg, r_mm, z_mm)
-    """
-    if len(joints) < 3:
-        raise ValueError('joints must contain at least base/shoulder/elbow')
-
-    theta = float(joints[0])
-    shoulder = math.radians(float(joints[1]))
-    elbow_internal = math.radians(180.0 - float(joints[2]))
-
-    # Wrist-pivot position from 2-link planar FK.
-    r_wrist = L1 * math.cos(shoulder) + L2 * math.cos(shoulder - elbow_internal)
-    z = L1 * math.sin(shoulder) + L2 * math.sin(shoulder - elbow_internal)
-
-    # solve_ik subtracts L3 from radial distance; add it back to recover r.
-    r = max(0.0, r_wrist + L3)
-    return float(theta), float(r), float(z)

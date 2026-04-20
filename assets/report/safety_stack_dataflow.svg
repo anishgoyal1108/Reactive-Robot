@@ -1,0 +1,179 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" font-family="'Fira Sans','Helvetica Neue',sans-serif">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3a2a1a"/>
+    </marker>
+    <marker id="ar-rust" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8a3a1a"/>
+    </marker>
+    <filter id="sh" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="2"/>
+      <feOffset dx="0" dy="1.5" result="o"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.22"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="720" fill="#faf5e9"/>
+
+  <!-- Title -->
+  <text x="640" y="42" font-size="22" font-weight="600" fill="#2a2418" text-anchor="middle">Safety Stack Internals — braccio_ctrl/safety/</text>
+  <text x="640" y="66" font-size="13" fill="#5a4a3a" text-anchor="middle" font-style="italic">single-chokepoint architecture; every commanded motion passes through SafetyAPI before any servo moves</text>
+
+  <!-- Layer labels (left-side) -->
+  <g font-size="11" font-weight="600" fill="#5a4a3a" text-anchor="end">
+    <text x="60" y="130">Intents</text>
+    <text x="60" y="220">Chokepoint</text>
+    <text x="60" y="350">Orchestration</text>
+    <text x="60" y="500">Services</text>
+    <text x="60" y="650">Actuation</text>
+  </g>
+  <g stroke="#d8ccb6" stroke-width="1" stroke-dasharray="3,4">
+    <line x1="75" y1="170" x2="1240" y2="170"/>
+    <line x1="75" y1="275" x2="1240" y2="275"/>
+    <line x1="75" y1="420" x2="1240" y2="420"/>
+    <line x1="75" y1="570" x2="1240" y2="570"/>
+  </g>
+
+  <!-- Layer 1: Intents -->
+  <g filter="url(#sh)">
+    <rect x="230" y="100" width="180" height="50" rx="6" fill="#ffffff" stroke="#3b5998" stroke-width="1.6"/>
+    <text x="320" y="122" font-size="12" font-weight="700" fill="#3b5998" text-anchor="middle">queue_manual_intent</text>
+    <text x="320" y="140" font-size="10" fill="#5a4a3a" text-anchor="middle">keyboard nudge</text>
+
+    <rect x="550" y="100" width="180" height="50" rx="6" fill="#ffffff" stroke="#3b5998" stroke-width="1.6"/>
+    <text x="640" y="122" font-size="12" font-weight="700" fill="#3b5998" text-anchor="middle">plan_and_validate</text>
+    <text x="640" y="140" font-size="10" fill="#5a4a3a" text-anchor="middle">single target pose</text>
+
+    <rect x="870" y="100" width="180" height="50" rx="6" fill="#ffffff" stroke="#3b5998" stroke-width="1.6"/>
+    <text x="960" y="122" font-size="12" font-weight="700" fill="#3b5998" text-anchor="middle">queue_sequence</text>
+    <text x="960" y="140" font-size="10" fill="#5a4a3a" text-anchor="middle">waypoint program</text>
+  </g>
+
+  <!-- Layer 2: SafetyAPI chokepoint -->
+  <g filter="url(#sh)">
+    <rect x="440" y="195" width="400" height="58" rx="8" fill="#fff3e8" stroke="#8a3a1a" stroke-width="2.4"/>
+    <text x="640" y="220" font-size="14" font-weight="700" fill="#8a3a1a" text-anchor="middle">SafetyAPI — api.py</text>
+    <text x="640" y="240" font-size="11" fill="#5a4a3a" text-anchor="middle">all three entry points converge here; every motion must validate</text>
+  </g>
+  <!-- Arrows intents → API -->
+  <g stroke="#8a3a1a" stroke-width="1.8" fill="none" marker-end="url(#ar-rust)">
+    <path d="M 320 150 Q 320 175 540 195"/>
+    <path d="M 640 150 L 640 195"/>
+    <path d="M 960 150 Q 960 175 740 195"/>
+  </g>
+
+  <!-- Layer 3: Orchestration - Behavior Tree -->
+  <g filter="url(#sh)">
+    <rect x="440" y="305" width="400" height="85" rx="8" fill="#ffffff" stroke="#8a3a1a" stroke-width="1.8"/>
+    <text x="640" y="327" font-size="13" font-weight="700" fill="#8a3a1a" text-anchor="middle">Behavior Tree — behavior.py</text>
+    <text x="640" y="348" font-size="11" fill="#5a4a3a" text-anchor="middle">py_trees selector: pre-scan → plan → validate → dispatch</text>
+    <text x="640" y="365" font-size="10" fill="#5a4a3a" text-anchor="middle" font-family="'JetBrains Mono',monospace">modes: idle, manual, auto_sweep, sequence_exec, retreat</text>
+    <text x="640" y="380" font-size="10" fill="#8a7a6a" text-anchor="middle">selector-based task sequencing + mode transitions</text>
+  </g>
+  <!-- API → BT -->
+  <g stroke="#8a3a1a" stroke-width="2" fill="none" marker-end="url(#ar-rust)">
+    <path d="M 640 253 L 640 305"/>
+  </g>
+
+  <!-- Layer 4: Services (6 boxes) -->
+  <g filter="url(#sh)">
+    <!-- world_model -->
+    <rect x="80" y="450" width="165" height="100" rx="6" fill="#ffffff" stroke="#3b5998" stroke-width="1.5"/>
+    <text x="162" y="472" font-size="12" font-weight="700" fill="#3b5998" text-anchor="middle">world_model.py</text>
+    <text x="162" y="490" font-size="10" fill="#5a4a3a" text-anchor="middle">KDTree obstacle cloud</text>
+    <text x="162" y="504" font-size="10" fill="#5a4a3a" text-anchor="middle">log-odds voxel grid</text>
+    <text x="162" y="521" font-size="9" fill="#8a7a6a" text-anchor="middle" font-style="italic">ingests raw ToF frames</text>
+    <text x="162" y="537" font-size="9" fill="#8a7a6a" text-anchor="middle" font-style="italic">fuses peer observations</text>
+
+    <!-- collision -->
+    <rect x="265" y="450" width="165" height="100" rx="6" fill="#ffffff" stroke="#3b5998" stroke-width="1.5"/>
+    <text x="347" y="472" font-size="12" font-weight="700" fill="#3b5998" text-anchor="middle">collision.py</text>
+    <text x="347" y="490" font-size="10" fill="#5a4a3a" text-anchor="middle">capsule-vs-cloud</text>
+    <text x="347" y="504" font-size="10" fill="#5a4a3a" text-anchor="middle">per-link distance</text>
+    <text x="347" y="521" font-size="9" fill="#8a7a6a" text-anchor="middle" font-style="italic">uses fk.py capsules</text>
+    <text x="347" y="537" font-size="9" fill="#8a7a6a" text-anchor="middle" font-style="italic">nearest-neighbor query</text>
+
+    <!-- planner -->
+    <rect x="450" y="450" width="165" height="100" rx="6" fill="#ffffff" stroke="#3b5998" stroke-width="1.5"/>
+    <text x="532" y="472" font-size="12" font-weight="700" fill="#3b5998" text-anchor="middle">planner.py</text>
+    <text x="532" y="490" font-size="10" fill="#5a4a3a" text-anchor="middle">BiRRT joint-space</text>
+    <text x="532" y="504" font-size="10" fill="#5a4a3a" text-anchor="middle">collision-free path</text>
+    <text x="532" y="521" font-size="9" fill="#8a7a6a" text-anchor="middle" font-style="italic">pybullet-planning</text>
+    <text x="532" y="537" font-size="9" fill="#8a7a6a" text-anchor="middle" font-style="italic">bounded search time</text>
+
+    <!-- replanner -->
+    <rect x="635" y="450" width="165" height="100" rx="6" fill="#ffffff" stroke="#3b5998" stroke-width="1.5"/>
+    <text x="717" y="472" font-size="12" font-weight="700" fill="#3b5998" text-anchor="middle">replanner.py</text>
+    <text x="717" y="490" font-size="10" fill="#5a4a3a" text-anchor="middle">6-strategy ladder</text>
+    <text x="717" y="504" font-size="10" fill="#5a4a3a" text-anchor="middle">ESSENTIAL → RETREAT</text>
+    <text x="717" y="521" font-size="9" fill="#8a7a6a" text-anchor="middle" font-style="italic">waypoint relaxation</text>
+    <text x="717" y="537" font-size="9" fill="#8a7a6a" text-anchor="middle" font-style="italic">progressive fallback</text>
+
+    <!-- pre_scan -->
+    <rect x="820" y="450" width="165" height="100" rx="6" fill="#ffffff" stroke="#3b5998" stroke-width="1.5"/>
+    <text x="902" y="472" font-size="12" font-weight="700" fill="#3b5998" text-anchor="middle">pre_scan.py</text>
+    <text x="902" y="490" font-size="10" fill="#5a4a3a" text-anchor="middle">wrist sweep 2–3 poses</text>
+    <text x="902" y="504" font-size="10" fill="#5a4a3a" text-anchor="middle">fills blind spots</text>
+    <text x="902" y="521" font-size="9" fill="#8a7a6a" text-anchor="middle" font-style="italic">runs before commit</text>
+    <text x="902" y="537" font-size="9" fill="#8a7a6a" text-anchor="middle" font-style="italic">populates world_model</text>
+
+    <!-- polar_map + hysteresis (stacked in last column) -->
+    <rect x="1005" y="450" width="190" height="46" rx="6" fill="#ffffff" stroke="#3b5998" stroke-width="1.5"/>
+    <text x="1100" y="470" font-size="12" font-weight="700" fill="#3b5998" text-anchor="middle">polar_map.py</text>
+    <text x="1100" y="487" font-size="10" fill="#5a4a3a" text-anchor="middle">1D sweep skip-ahead</text>
+
+    <rect x="1005" y="504" width="190" height="46" rx="6" fill="#ffffff" stroke="#3b5998" stroke-width="1.5"/>
+    <text x="1100" y="524" font-size="12" font-weight="700" fill="#3b5998" text-anchor="middle">hysteresis.py</text>
+    <text x="1100" y="541" font-size="10" fill="#5a4a3a" text-anchor="middle">debounce · latch · rate-limit</text>
+  </g>
+
+  <!-- BT → Services arrows -->
+  <g stroke="#3a2a1a" stroke-width="1.2" fill="none" marker-end="url(#ar)">
+    <path d="M 550 390 Q 340 420 200 450"/>
+    <path d="M 580 390 Q 430 420 360 450"/>
+    <path d="M 620 390 L 540 450"/>
+    <path d="M 680 390 L 720 450"/>
+    <path d="M 720 390 Q 830 420 900 450"/>
+    <path d="M 770 390 Q 950 420 1080 450"/>
+  </g>
+
+  <!-- fk.py support box (behind services, smaller) -->
+  <g filter="url(#sh)">
+    <rect x="265" y="580" width="165" height="42" rx="6" fill="#f4ecd9" stroke="#8a7a5a" stroke-width="1.3" stroke-dasharray="0"/>
+    <text x="347" y="600" font-size="11" font-weight="700" fill="#5a4a3a" text-anchor="middle">fk.py</text>
+    <text x="347" y="614" font-size="9" fill="#5a4a3a" text-anchor="middle">PyBullet URDF link capsules</text>
+  </g>
+  <g stroke="#8a7a5a" stroke-width="1" stroke-dasharray="3,3" fill="none" marker-end="url(#ar)">
+    <path d="M 347 580 L 347 550"/>
+  </g>
+
+  <!-- dialog.py (minor feedback box) -->
+  <g filter="url(#sh)">
+    <rect x="1005" y="580" width="190" height="42" rx="6" fill="#f4ecd9" stroke="#8a7a5a" stroke-width="1.3"/>
+    <text x="1100" y="600" font-size="11" font-weight="700" fill="#5a4a3a" text-anchor="middle">dialog.py</text>
+    <text x="1100" y="614" font-size="9" fill="#5a4a3a" text-anchor="middle">refusal messages to user</text>
+  </g>
+
+  <!-- Layer 5: Actuation -->
+  <g filter="url(#sh)">
+    <rect x="440" y="625" width="400" height="58" rx="8" fill="#ffffff" stroke="#3a2a1a" stroke-width="1.8"/>
+    <text x="640" y="650" font-size="13" font-weight="700" fill="#3a2a1a" text-anchor="middle">Serial Bridge → Braccio V2</text>
+    <text x="640" y="668" font-size="10" fill="#5a4a3a" text-anchor="middle" font-family="'JetBrains Mono',monospace">SET ALL · SET DELTA · GET POS</text>
+  </g>
+  <!-- Services → actuation (only through BT, shown once) -->
+  <g stroke="#8a3a1a" stroke-width="2" fill="none" marker-end="url(#ar-rust)">
+    <path d="M 640 390 L 640 625"/>
+  </g>
+
+  <!-- Legend -->
+  <g transform="translate(78, 690)" font-size="10" fill="#3a2a1a">
+    <line x1="0" y1="0" x2="25" y2="0" stroke="#8a3a1a" stroke-width="2"/>
+    <text x="32" y="4">safety-critical path</text>
+    <line x1="170" y1="0" x2="195" y2="0" stroke="#3a2a1a" stroke-width="1.2"/>
+    <text x="202" y="4">supporting call</text>
+    <line x1="320" y1="0" x2="345" y2="0" stroke="#8a7a5a" stroke-width="1" stroke-dasharray="3,3"/>
+    <text x="352" y="4">helper / utility</text>
+  </g>
+</svg>

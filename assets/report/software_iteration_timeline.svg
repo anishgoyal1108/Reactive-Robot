@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 520" font-family="'Fira Sans','Helvetica Neue',sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3a2a1a"/>
+    </marker>
+    <filter id="softshadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="2"/>
+      <feOffset dx="0" dy="1.5" result="offsetblur"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.25"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1280" height="520" fill="#faf5e9"/>
+
+  <!-- Title -->
+  <text x="640" y="48" font-size="22" font-weight="600" fill="#2a2418" text-anchor="middle">Reactive Robot — Software Iteration Timeline</text>
+  <text x="640" y="72" font-size="13" fill="#5a4a3a" text-anchor="middle" font-style="italic">from initial sensor pipeline to safety-stack refactor and RL bootstrap</text>
+
+  <!-- Timeline axis -->
+  <line x1="100" y1="270" x2="1180" y2="270" stroke="#3a2a1a" stroke-width="2.5"/>
+  <polygon points="1180,262 1195,270 1180,278" fill="#3a2a1a"/>
+
+  <!-- Axis ticks -->
+  <g font-size="11" fill="#5a4a3a" text-anchor="middle">
+    <line x1="140" y1="265" x2="140" y2="275" stroke="#3a2a1a" stroke-width="1.5"/>
+    <text x="140" y="295">Mar 4</text>
+    <line x1="400" y1="265" x2="400" y2="275" stroke="#3a2a1a" stroke-width="1.5"/>
+    <text x="400" y="295">Mar 25</text>
+    <line x1="700" y1="265" x2="700" y2="275" stroke="#3a2a1a" stroke-width="1.5"/>
+    <text x="700" y="295">Apr 9–10</text>
+    <line x1="950" y1="265" x2="950" y2="275" stroke="#3a2a1a" stroke-width="1.5"/>
+    <text x="950" y="295">Apr 15</text>
+    <line x1="1140" y1="265" x2="1140" y2="275" stroke="#3a2a1a" stroke-width="1.5"/>
+    <text x="1140" y="295">Apr 19</text>
+  </g>
+
+  <!-- Phase markers (dots on axis) -->
+  <g filter="url(#softshadow)">
+    <circle cx="140" cy="270" r="13" fill="#b5651d" stroke="#3a2a1a" stroke-width="1.8"/>
+    <circle cx="400" cy="270" r="13" fill="#3b5998" stroke="#3a2a1a" stroke-width="1.8"/>
+    <circle cx="660" cy="270" r="13" fill="#3b5998" stroke="#3a2a1a" stroke-width="1.8"/>
+    <circle cx="740" cy="270" r="13" fill="#8a3a1a" stroke="#3a2a1a" stroke-width="1.8"/>
+    <circle cx="950" cy="270" r="16" fill="#8a3a1a" stroke="#3a2a1a" stroke-width="2.2"/>
+    <circle cx="1140" cy="270" r="13" fill="#5a7a5a" stroke="#3a2a1a" stroke-width="1.8"/>
+  </g>
+
+  <!-- Phase cards ABOVE timeline -->
+  <!-- Phase 1: ToF pipeline -->
+  <g>
+    <rect x="80" y="135" width="130" height="90" rx="6" fill="#ffffff" stroke="#b5651d" stroke-width="1.5" filter="url(#softshadow)"/>
+    <text x="145" y="158" font-size="12" font-weight="700" fill="#b5651d" text-anchor="middle">Phase 1</text>
+    <text x="145" y="176" font-size="11" font-weight="600" fill="#2a2418" text-anchor="middle">ToF pipeline</text>
+    <text x="145" y="192" font-size="10" fill="#5a4a3a" text-anchor="middle">Teensy 8×8 grids</text>
+    <text x="145" y="206" font-size="10" fill="#5a4a3a" text-anchor="middle">Lark config</text>
+    <text x="145" y="220" font-size="9" fill="#8a7a6a" text-anchor="middle" font-family="'JetBrains Mono',monospace">653d689</text>
+    <line x1="145" y1="225" x2="140" y2="257" stroke="#b5651d" stroke-width="1.2" stroke-dasharray="3,2"/>
+  </g>
+
+  <!-- Phase 3: Kalman + auto_sweep -->
+  <g>
+    <rect x="335" y="135" width="150" height="90" rx="6" fill="#ffffff" stroke="#3b5998" stroke-width="1.5" filter="url(#softshadow)"/>
+    <text x="410" y="158" font-size="12" font-weight="700" fill="#3b5998" text-anchor="middle">Phase 3</text>
+    <text x="410" y="176" font-size="11" font-weight="600" fill="#2a2418" text-anchor="middle">First avoidance</text>
+    <text x="410" y="192" font-size="10" fill="#5a4a3a" text-anchor="middle">Kalman centroid</text>
+    <text x="410" y="206" font-size="10" fill="#5a4a3a" text-anchor="middle">auto_sweep FSM</text>
+    <text x="410" y="220" font-size="9" fill="#8a7a6a" text-anchor="middle" font-family="'JetBrains Mono',monospace">bc383b4</text>
+    <line x1="410" y1="225" x2="400" y2="257" stroke="#3b5998" stroke-width="1.2" stroke-dasharray="3,2"/>
+  </g>
+
+  <!-- Phase 4: Persistent memory -->
+  <g>
+    <rect x="595" y="135" width="130" height="90" rx="6" fill="#ffffff" stroke="#3b5998" stroke-width="1.5" filter="url(#softshadow)"/>
+    <text x="660" y="158" font-size="12" font-weight="700" fill="#3b5998" text-anchor="middle">Phase 4</text>
+    <text x="660" y="176" font-size="11" font-weight="600" fill="#2a2418" text-anchor="middle">Voxel memory</text>
+    <text x="660" y="192" font-size="10" fill="#5a4a3a" text-anchor="middle">confidence decay</text>
+    <text x="660" y="206" font-size="10" fill="#5a4a3a" text-anchor="middle">FOV-gap retention</text>
+    <text x="660" y="220" font-size="9" fill="#8a7a6a" text-anchor="middle" font-family="'JetBrains Mono',monospace">78bd58f</text>
+    <line x1="660" y1="225" x2="660" y2="257" stroke="#3b5998" stroke-width="1.2" stroke-dasharray="3,2"/>
+  </g>
+
+  <!-- Phase 2 + 5: Apr 10 (MotionGuard & digital twin stacked) -->
+  <g>
+    <rect x="755" y="135" width="150" height="90" rx="6" fill="#ffffff" stroke="#8a3a1a" stroke-width="1.5" filter="url(#softshadow)"/>
+    <text x="830" y="158" font-size="12" font-weight="700" fill="#8a3a1a" text-anchor="middle">Phase 5 (+2)</text>
+    <text x="830" y="176" font-size="11" font-weight="600" fill="#2a2418" text-anchor="middle">MotionGuard</text>
+    <text x="830" y="192" font-size="10" fill="#5a4a3a" text-anchor="middle">CH2 → REPLAN</text>
+    <text x="830" y="206" font-size="10" fill="#5a4a3a" text-anchor="middle">sync chokepoint</text>
+    <text x="830" y="220" font-size="9" fill="#8a7a6a" text-anchor="middle" font-family="'JetBrains Mono',monospace">a29998d</text>
+    <line x1="790" y1="225" x2="745" y2="257" stroke="#8a3a1a" stroke-width="1.2" stroke-dasharray="3,2"/>
+  </g>
+
+  <!-- Phase 6: Safety stack refactor (BIG) -->
+  <g>
+    <rect x="870" y="355" width="170" height="110" rx="6" fill="#ffffff" stroke="#8a3a1a" stroke-width="2.2" filter="url(#softshadow)"/>
+    <text x="955" y="378" font-size="13" font-weight="700" fill="#8a3a1a" text-anchor="middle">Phase 6 — refactor</text>
+    <text x="955" y="398" font-size="11" font-weight="600" fill="#2a2418" text-anchor="middle">braccio_ctrl/safety/</text>
+    <text x="955" y="414" font-size="10" fill="#5a4a3a" text-anchor="middle">behavior tree + BiRRT</text>
+    <text x="955" y="428" font-size="10" fill="#5a4a3a" text-anchor="middle">capsule collision</text>
+    <text x="955" y="442" font-size="10" fill="#5a4a3a" text-anchor="middle">+5,957 / −1,732 LOC</text>
+    <text x="955" y="458" font-size="9" fill="#8a7a6a" text-anchor="middle" font-family="'JetBrains Mono',monospace">abf1530</text>
+    <line x1="955" y1="355" x2="950" y2="287" stroke="#8a3a1a" stroke-width="1.8" stroke-dasharray="3,2"/>
+  </g>
+
+  <!-- Phase 7: RL -->
+  <g>
+    <rect x="1075" y="135" width="135" height="90" rx="6" fill="#ffffff" stroke="#5a7a5a" stroke-width="1.5" filter="url(#softshadow)"/>
+    <text x="1142" y="158" font-size="12" font-weight="700" fill="#3a5a3a" text-anchor="middle">Phase 7</text>
+    <text x="1142" y="176" font-size="11" font-weight="600" fill="#2a2418" text-anchor="middle">RL pipeline</text>
+    <text x="1142" y="192" font-size="10" fill="#5a4a3a" text-anchor="middle">74-float obs</text>
+    <text x="1142" y="206" font-size="10" fill="#5a4a3a" text-anchor="middle">4D action space</text>
+    <text x="1142" y="220" font-size="9" fill="#8a7a6a" text-anchor="middle" font-family="'JetBrains Mono',monospace">6d25677</text>
+    <line x1="1142" y1="225" x2="1140" y2="257" stroke="#5a7a5a" stroke-width="1.2" stroke-dasharray="3,2"/>
+  </g>
+
+  <!-- CH2 incident callout (below Apr 10) -->
+  <g>
+    <path d="M 740 283 Q 600 330 460 355" fill="none" stroke="#8a3a1a" stroke-width="1.2" stroke-dasharray="4,3"/>
+    <rect x="280" y="355" width="200" height="70" rx="6" fill="#fff3e8" stroke="#8a3a1a" stroke-width="1.5" filter="url(#softshadow)"/>
+    <text x="380" y="377" font-size="11" font-weight="700" fill="#8a3a1a" text-anchor="middle">⚠ CH2 field incident</text>
+    <text x="380" y="395" font-size="10" fill="#5a4a3a" text-anchor="middle">user's hand at ~100 mm,</text>
+    <text x="380" y="409" font-size="10" fill="#5a4a3a" text-anchor="middle">advisory-only channel,</text>
+    <text x="380" y="422" font-size="10" fill="#5a4a3a" text-anchor="middle">motion command not gated</text>
+  </g>
+
+  <!-- Phase legend -->
+  <g transform="translate(90, 445)" font-size="10" fill="#3a2a1a">
+    <text x="0" y="10" font-weight="600" font-size="11">Subsystem</text>
+    <circle cx="5" cy="28" r="6" fill="#b5651d" stroke="#3a2a1a" stroke-width="1"/>
+    <text x="16" y="32">firmware / embedded sensing</text>
+    <circle cx="5" cy="48" r="6" fill="#3b5998" stroke="#3a2a1a" stroke-width="1"/>
+    <text x="16" y="52">host-side control logic</text>
+  </g>
+  <g transform="translate(510, 445)" font-size="10" fill="#3a2a1a">
+    <circle cx="5" cy="8" r="6" fill="#8a3a1a" stroke="#3a2a1a" stroke-width="1"/>
+    <text x="16" y="12">safety-critical refactor</text>
+    <circle cx="5" cy="28" r="6" fill="#5a7a5a" stroke="#3a2a1a" stroke-width="1"/>
+    <text x="16" y="32">learning / simulation</text>
+  </g>
+
+  <!-- Footer caption -->
+  <text x="640" y="503" font-size="10" fill="#8a7a6a" text-anchor="middle" font-style="italic">Commit SHAs on the main branch, March 4 — April 19, 2026</text>
+</svg>

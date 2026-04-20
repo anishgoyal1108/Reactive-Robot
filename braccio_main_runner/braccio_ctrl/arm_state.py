@@ -63,6 +63,14 @@ class ArmState:
         self.last_resp:  str  = ""
         self.last_error: str  = ""
 
+        # Startup latch: polar (theta/r/z) is synced from the Arduino's actual
+        # joint positions on the first POS response, then pinned. Subsequent
+        # POS responses only refresh `joints`. IK quantizes to integer servo
+        # angles, so re-deriving polar from every POS would leak ~1–10 mm
+        # of rounding drift per round trip — making right-arrow "also move
+        # down" or Q/E steps arrive off the commanded grid.
+        self.polar_synced: bool = False
+
         # ── ToF / IR obstacle state (updated by controller) ─────────────
         self.obstacle_response: str   = 'clear'    # 'clear', 'replan', 'back_away'
         self.obstacle_source:   str   = ''          # 'tof_chN' or 'ir'

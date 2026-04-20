@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 760" font-family="'Fira Sans','Helvetica Neue',sans-serif">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3a2a1a"/>
+    </marker>
+    <marker id="ar-g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3a5a3a"/>
+    </marker>
+    <marker id="ar-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3b5998"/>
+    </marker>
+    <filter id="sh" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="2.5"/>
+      <feOffset dx="0" dy="2"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.25"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="4"/>
+    </filter>
+    <radialGradient id="objective-grad" cx="50%" cy="50%" r="55%">
+      <stop offset="0%" stop-color="#f4d78e"/>
+      <stop offset="100%" stop-color="#d4a64e"/>
+    </radialGradient>
+    <linearGradient id="robot-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#f0e8d4"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="760" fill="#faf5e9"/>
+
+  <!-- Title -->
+  <text x="640" y="44" font-size="22" font-weight="600" fill="#2a2418" text-anchor="middle">Decentralized Cooperation — protocol layer between agentic robots</text>
+  <text x="640" y="68" font-size="13" fill="#5a4a3a" text-anchor="middle" font-style="italic">shared objective emerges from individually-maximized reward (Silver, Singh, Precup, Sutton 2021)</text>
+
+  <!-- Shared objective (top center, glowing) -->
+  <g filter="url(#sh)">
+    <ellipse cx="640" cy="160" rx="190" ry="62" fill="url(#objective-grad)" stroke="#8a5a1a" stroke-width="2.4"/>
+    <text x="640" y="150" font-size="16" font-weight="700" fill="#3a2a1a" text-anchor="middle">Shared Objective</text>
+    <text x="640" y="172" font-size="11" fill="#3a2a1a" text-anchor="middle" font-style="italic">e.g. collision-free bimanual</text>
+    <text x="640" y="188" font-size="11" fill="#3a2a1a" text-anchor="middle" font-style="italic">assembly on shared workspace</text>
+  </g>
+  <!-- emerging from phrase -->
+  <text x="640" y="245" font-size="11" font-style="italic" fill="#5a4a3a" text-anchor="middle">emerges from reward alignment — not imposed top-down</text>
+
+  <!-- Three robots in an arc -->
+  <!-- Robot A (left) -->
+  <g filter="url(#sh)" transform="translate(180, 390)">
+    <rect x="0" y="0" width="220" height="200" rx="12" fill="url(#robot-grad)" stroke="#3b5998" stroke-width="2"/>
+    <!-- stylized arm icon -->
+    <g transform="translate(110, 50)" stroke="#3b5998" stroke-width="3" fill="none" stroke-linecap="round">
+      <circle cx="0" cy="0" r="9" fill="#3b5998"/>
+      <line x1="0" y1="0" x2="-22" y2="-28"/>
+      <circle cx="-22" cy="-28" r="5" fill="#3b5998"/>
+      <line x1="-22" y1="-28" x2="8" y2="-48"/>
+      <circle cx="8" cy="-48" r="5" fill="#3b5998"/>
+      <line x1="8" y1="-48" x2="26" y2="-36"/>
+    </g>
+    <text x="110" y="120" font-size="14" font-weight="700" fill="#3b5998" text-anchor="middle">Agent A</text>
+    <line x1="25" y1="132" x2="195" y2="132" stroke="#c0c0c0" stroke-width="1"/>
+    <text x="110" y="152" font-size="11" font-weight="600" fill="#3a2a1a" text-anchor="middle" font-family="'JetBrains Mono',monospace">R_A(s, a)</text>
+    <text x="110" y="170" font-size="10" fill="#5a4a3a" text-anchor="middle">task progress − collision</text>
+    <text x="110" y="184" font-size="10" fill="#5a4a3a" text-anchor="middle">− energy − idle time</text>
+  </g>
+
+  <!-- Robot B (center) -->
+  <g filter="url(#sh)" transform="translate(530, 440)">
+    <rect x="0" y="0" width="220" height="200" rx="12" fill="url(#robot-grad)" stroke="#3b5998" stroke-width="2"/>
+    <g transform="translate(110, 50)" stroke="#3b5998" stroke-width="3" fill="none" stroke-linecap="round">
+      <circle cx="0" cy="0" r="9" fill="#3b5998"/>
+      <line x1="0" y1="0" x2="0" y2="-32"/>
+      <circle cx="0" cy="-32" r="5" fill="#3b5998"/>
+      <line x1="0" y1="-32" x2="26" y2="-46"/>
+      <circle cx="26" cy="-46" r="5" fill="#3b5998"/>
+      <line x1="26" y1="-46" x2="46" y2="-32"/>
+    </g>
+    <text x="110" y="120" font-size="14" font-weight="700" fill="#3b5998" text-anchor="middle">Agent B</text>
+    <line x1="25" y1="132" x2="195" y2="132" stroke="#c0c0c0" stroke-width="1"/>
+    <text x="110" y="152" font-size="11" font-weight="600" fill="#3a2a1a" text-anchor="middle" font-family="'JetBrains Mono',monospace">R_B(s, a)</text>
+    <text x="110" y="170" font-size="10" fill="#5a4a3a" text-anchor="middle">task progress − collision</text>
+    <text x="110" y="184" font-size="10" fill="#5a4a3a" text-anchor="middle">+ peer-aid bonus</text>
+  </g>
+
+  <!-- Robot C (right) -->
+  <g filter="url(#sh)" transform="translate(880, 390)">
+    <rect x="0" y="0" width="220" height="200" rx="12" fill="url(#robot-grad)" stroke="#3b5998" stroke-width="2"/>
+    <g transform="translate(110, 50)" stroke="#3b5998" stroke-width="3" fill="none" stroke-linecap="round">
+      <circle cx="0" cy="0" r="9" fill="#3b5998"/>
+      <line x1="0" y1="0" x2="22" y2="-28"/>
+      <circle cx="22" cy="-28" r="5" fill="#3b5998"/>
+      <line x1="22" y1="-28" x2="-8" y2="-48"/>
+      <circle cx="-8" cy="-48" r="5" fill="#3b5998"/>
+      <line x1="-8" y1="-48" x2="-26" y2="-36"/>
+    </g>
+    <text x="110" y="120" font-size="14" font-weight="700" fill="#3b5998" text-anchor="middle">Agent C</text>
+    <line x1="25" y1="132" x2="195" y2="132" stroke="#c0c0c0" stroke-width="1"/>
+    <text x="110" y="152" font-size="11" font-weight="600" fill="#3a2a1a" text-anchor="middle" font-family="'JetBrains Mono',monospace">R_C(s, a)</text>
+    <text x="110" y="170" font-size="10" fill="#5a4a3a" text-anchor="middle">task progress − collision</text>
+    <text x="110" y="184" font-size="10" fill="#5a4a3a" text-anchor="middle">− workspace contention</text>
+  </g>
+
+  <!-- Protocol message arrows (bidirectional curves between robots) -->
+  <!-- A <-> B -->
+  <g stroke="#3b5998" stroke-width="1.8" fill="none" marker-end="url(#ar-a)" marker-start="url(#ar-a)">
+    <path d="M 400 490 Q 465 465 530 510"/>
+  </g>
+  <!-- B <-> C -->
+  <g stroke="#3b5998" stroke-width="1.8" fill="none" marker-end="url(#ar-a)" marker-start="url(#ar-a)">
+    <path d="M 750 510 Q 815 465 880 490"/>
+  </g>
+  <!-- A <-> C (long arc over the top of B) -->
+  <g stroke="#3b5998" stroke-width="1.5" fill="none" marker-end="url(#ar-a)" marker-start="url(#ar-a)" opacity="0.55" stroke-dasharray="5,3">
+    <path d="M 400 440 Q 640 335 880 440"/>
+  </g>
+
+  <!-- Robots → objective (reward pushes up) -->
+  <g stroke="#3a5a3a" stroke-width="1.6" fill="none" marker-end="url(#ar-g)" opacity="0.8">
+    <path d="M 290 390 Q 400 290 540 220"/>
+    <path d="M 640 440 L 640 225"/>
+    <path d="M 990 390 Q 880 290 740 220"/>
+  </g>
+  <text x="425" y="320" font-size="10.5" fill="#3a5a3a" font-weight="600" font-style="italic" text-anchor="middle" transform="rotate(-32 425 320)">maximize R_A</text>
+  <text x="675" y="335" font-size="10.5" fill="#3a5a3a" font-weight="600" font-style="italic" text-anchor="middle">maximize R_B</text>
+  <text x="855" y="320" font-size="10.5" fill="#3a5a3a" font-weight="600" font-style="italic" text-anchor="middle" transform="rotate(32 855 320)">maximize R_C</text>
+
+  <!-- Protocol layer annotation (between the two A-B arrow paths) -->
+  <g filter="url(#sh)">
+    <rect x="440" y="645" width="400" height="75" rx="10" fill="#ffffff" stroke="#3b5998" stroke-width="1.5"/>
+    <text x="640" y="667" font-size="13" font-weight="700" fill="#3b5998" text-anchor="middle">Protocol Layer</text>
+    <text x="640" y="686" font-size="10.5" fill="#5a4a3a" text-anchor="middle" font-family="'JetBrains Mono',monospace">discovery · state · intent · reward-bid · observation</text>
+    <text x="640" y="703" font-size="10" fill="#5a4a3a" text-anchor="middle">UDP multicast · 10 Hz broadcast · stateless</text>
+  </g>
+
+  <!-- link arrows from protocol label to the inter-robot arrows -->
+  <g stroke="#3b5998" stroke-width="1" stroke-dasharray="3,3" fill="none" opacity="0.7">
+    <path d="M 540 645 Q 500 580 465 500"/>
+    <path d="M 740 645 Q 780 580 815 500"/>
+  </g>
+
+  <!-- Message schema box (bottom left) -->
+  <g filter="url(#sh)">
+    <rect x="60" y="645" width="340" height="85" rx="8" fill="#f4ecd9" stroke="#8a7a5a" stroke-width="1.3"/>
+    <text x="230" y="665" font-size="12" font-weight="700" fill="#5a4a3a" text-anchor="middle">message schema</text>
+    <text x="75" y="686" font-size="10" fill="#3a2a1a" font-family="'JetBrains Mono',monospace">{ id, t, pose, target, obstacles[],</text>
+    <text x="75" y="702" font-size="10" fill="#3a2a1a" font-family="'JetBrains Mono',monospace">  reward_vec, intent, confidence }</text>
+    <text x="230" y="720" font-size="9" fill="#5a4a3a" text-anchor="middle" font-style="italic">identity + state + reward + intent</text>
+  </g>
+
+  <!-- Conflict resolution box (bottom right) -->
+  <g filter="url(#sh)">
+    <rect x="880" y="645" width="340" height="85" rx="8" fill="#f4ecd9" stroke="#8a7a5a" stroke-width="1.3"/>
+    <text x="1050" y="665" font-size="12" font-weight="700" fill="#5a4a3a" text-anchor="middle">conflict resolution</text>
+    <text x="1050" y="686" font-size="10.5" fill="#3a2a1a" text-anchor="middle">path intersection → intent-bid</text>
+    <text x="1050" y="702" font-size="10.5" fill="#3a2a1a" text-anchor="middle">highest reward-to-go proceeds</text>
+    <text x="1050" y="720" font-size="9" fill="#5a4a3a" text-anchor="middle" font-style="italic">ties broken deterministically by id</text>
+  </g>
+</svg>

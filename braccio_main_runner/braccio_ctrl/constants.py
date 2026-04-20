@@ -96,6 +96,15 @@ LOG_DIR = "logs"
 SCREENSHOT_DIR = "screenshots"
 SESSION_LOG_DIR = "session_logs"  # JSONL telemetry for offline review
 SESSION_LOG_HZ = 10  # telemetry sample rate (Hz)
+# Opt-in geometry emission for the session-replay visualiser. When True,
+# each tick includes world_points (capped list of [x,y,z] obstacle points
+# in arm-base frame, mm) and detour_path (active 6-DOF waypoint cache).
+# Set False to keep logs small if replay geometry isn't needed.
+SESSION_LOG_INCLUDE_GEOMETRY = True
+# Upper bound on world_points emitted per tick. 64 is enough to render
+# a dense cloud of detected obstacle points without ballooning log size
+# (64 × 3 × 8 bytes ≈ 1.5 KB/tick worst-case).
+SESSION_LOG_MAX_WORLD_POINTS = 64
 
 # ── Data streaming (UDP to standalone plotter apps) ──────────────────────
 ARM_DATA_PORT = 9870  # joint-angle packets → arm_plotter_app.py
@@ -116,7 +125,7 @@ TOF_BAUD_RATE = 115200
 # 2026-04-17: CH1/CH2 bumped 100→250 (accuracy over speed) — at 100 mm the
 # sides were reacting too late and producing the escape_collision jitter in
 # session_20260417_014307.
-TOF_THRESHOLDS_MM = [250.0, 250.0, 50.0, 50.0]
+TOF_THRESHOLDS_MM = [100.0, 100.0, 50.0, 50.0]
 TOF_THRESHOLD_MM = TOF_THRESHOLDS_MM[0]  # legacy fallback alias
 TOF_UPSAMPLE_N = 40  # bilinear upsample resolution for plotting
 TOF_SURFACE_EVERY = 5  # redraw 3D surface every N frames (performance)
@@ -152,8 +161,8 @@ OBSTACLE_HOLD_S = 0.5
 # bumped 100/180 → 250/350 on 2026-04-17 after session_20260417_014307 showed
 # the sides reacting too late, producing escape_collision jitter. CH3 is
 # ignored (ground).
-TOF_ENGAGE_MM = [100.0, 250.0, 250.0, 50.0]
-TOF_DISENGAGE_MM = [180.0, 350.0, 350.0, 100.0]
+TOF_ENGAGE_MM = [100.0, 100.0, 50.0, 50.0]
+TOF_DISENGAGE_MM = [180.0, 180.0, 100.0, 100.0]
 
 # Joint command smoothing — EMA α (§7, DeXtreme default).
 # Lowered 0.2 → 0.15 on 2026-04-17 for a smoother spline (accuracy over

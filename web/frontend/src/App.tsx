@@ -30,15 +30,29 @@ import { ModeBanner } from "./mode/ModeBanner";
 import { DemoBanner } from "./mode/DemoBanner";
 import { isDemoMode } from "./mode/demoMode";
 import { api, type DeployMode } from "./state/api";
+import { ReplayTab } from "./replay/ReplayTab";
+import { ReplayOverlays } from "./replay/ReplayOverlays";
+import { useReplayStore } from "./replay/ReplayStore";
+
+type AppTab = "live" | "replay";
 
 export function App() {
   const demo = isDemoMode();
+  const [tab, setTab] = useState<AppTab>("live");
+  const setReplayActive = useReplayStore((s) => s.setActive);
+
   useEffect(() => {
     // No backend WebSocket in demo mode — suppress the telemetry
-    // reconnect loop so the console stays quiet.
-    if (demo) return;
+    // reconnect loop so the console stays quiet. Also suppress it
+    // while the Replay tab is active; closing the live feed means the
+    // Arm component sees a stable joint stream from the replay store.
+    if (demo || tab === "replay") return;
     return startTelemetry();
-  }, [demo]);
+  }, [demo, tab]);
+
+  useEffect(() => {
+    setReplayActive(tab === "replay");
+  }, [tab, setReplayActive]);
 
   const connected = useTelemetryStore((s) => s.connected);
   const joints = useTelemetryStore((s) => s.joints);
@@ -137,12 +151,34 @@ export function App() {
           Braccio Digital Twin
         </div>
         {!demo && <ModeBanner mode={mode} onModeChange={setMode} />}
+        <div className="app-shell__tabs" role="tablist" aria-label="Tabs">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "live"}
+            className={`app-shell__tab${tab === "live" ? " app-shell__tab--active" : ""}`}
+            onClick={() => setTab("live")}
+          >
+            Live
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "replay"}
+            className={`app-shell__tab${tab === "replay" ? " app-shell__tab--active" : ""}`}
+            onClick={() => setTab("replay")}
+          >
+            Replay
+          </button>
+        </div>
         <div>
-          {demo
-            ? "demo"
-            : status?.running
-              ? `running: line ${status.line} (${status.kind})`
-              : "idle"}
+          {tab === "replay"
+            ? "replay"
+            : demo
+              ? "demo"
+              : status?.running
+                ? `running: line ${status.line} (${status.kind})`
+                : "idle"}
         </div>
       </header>
 
@@ -151,17 +187,25 @@ export function App() {
           leftCollapsed ? " app-shell__left--collapsed" : ""
         }`}
       >
-        <div className="app-shell__left-header">
-          <div className="panel-heading">Blocks</div>
-          <RunControls code={code} />
-        </div>
-        <div className="app-shell__left-workspace">
-          <BlocklyEditor
-            savedStates={savedStates}
-            onCodeChange={setCode}
-            mode={mode}
-          />
-        </div>
+        {tab === "live" ? (
+          <>
+            <div className="app-shell__left-header">
+              <div className="panel-heading">Blocks</div>
+              <RunControls code={code} />
+            </div>
+            <div className="app-shell__left-workspace">
+              <BlocklyEditor
+                savedStates={savedStates}
+                onCodeChange={setCode}
+                mode={mode}
+              />
+            </div>
+          </>
+        ) : (
+          <div className="app-shell__left-workspace">
+            <ReplayTab />
+          </div>
+        )}
         <div
           className="app-shell__resize-handle"
           role="separator"
@@ -175,8 +219,14 @@ export function App() {
       <main className="app-shell__viewer">
         <Scene>
           <Arm />
-          <SensorRays />
-          <Obstacles />
+          {tab === "live" ? (
+            <>
+              <SensorRays />
+              <Obstacles />
+            </>
+          ) : (
+            <ReplayOverlays />
+          )}
         </Scene>
       </main>
 

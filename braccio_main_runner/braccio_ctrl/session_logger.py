@@ -79,7 +79,12 @@ from typing import Any, Optional
 
 import numpy as np
 
-from .constants import SESSION_LOG_DIR, SESSION_LOG_HZ
+from .constants import (
+    SESSION_LOG_DIR,
+    SESSION_LOG_HZ,
+    SESSION_LOG_INCLUDE_GEOMETRY,
+    SESSION_LOG_MAX_WORLD_POINTS,
+)
 
 
 def _grid_to_list(g: np.ndarray) -> list:
@@ -135,6 +140,9 @@ class SessionLogger:
         self._arm_state = None
         self._tof_state = None
         self._safety = None
+
+        # Strategy-change tracker for last_strategy_entry_tick.
+        self._prev_last_strategy: str = ""
 
     # ── Configuration ─────────────────────────────────────────────────────
 
@@ -273,6 +281,42 @@ class SessionLogger:
             thresholds = [thresholds] * len(grids)
 
         world = safety_snap.get("world", {}) or {}
+
+        # Geometry: optional [x,y,z] obstacle-point cloud + active detour
+        # waypoint cache. Both stay empty when the flag is off, when
+        # safety is None, or when there's no active detour. See
+        # SESSION_LOG_INCLUDE_GEOMETRY docstring in constants.py.
+        world_points: list[list[float]] = []
+        detour_path: list[list[int]] = []
+        if SESSION_LOG_INCLUDE_GEOMETRY and safety is not None:
+            try:
+                pts = safety.world.cloud_points()
+                if pts is not None and len(pts) > 0:
+                    # Most-recent-first: WorldModel's _points array is
+                    # ordered oldest→newest, so tail the last N.
+                    cap = int(SESSION_LOG_MAX_WORLD_POINTS)
+                    tail = pts[-cap:] if len(pts) > cap else pts
+                    world_points = [
+                        [round(float(x), 1), round(float(y), 1),
+                         round(float(z), 1)]
+                        for (x, y, z) in tail
+                    ]
+            except Exception:
+                world_points = []
+            try:
+                detour_path = [
+                    list(int(j) for j in q)
+                    for q in (safety_snap.get("sweep_detour_path") or [])
+                ]
+            except Exception:
+                detour_path = []
+
+        last_strategy = safety_snap.get("last_strategy", "")
+        strategy_changed = bool(
+            last_strategy and last_strategy != self._prev_last_strategy
+        )
+        self._prev_last_strategy = last_strategy
+
         sample = {
             "t": round(now, 3),
             "t_rel": round(now - self._t0, 3),
@@ -313,6 +357,9 @@ class SessionLogger:
                 "grid_cells_occ": int(world.get("grid_cells_occ", 0)),
                 "grid_cells_free": int(world.get("grid_cells_free", 0)),
             },
+            "world_points": world_points,
+            "detour_path": detour_path,
+            "last_strategy_entry_tick": strategy_changed,
             "sweep": {
                 "running": safety_snap.get("mode") == "sweep",
                 "direction": int(safety_snap.get("sweep_direction", +1)),

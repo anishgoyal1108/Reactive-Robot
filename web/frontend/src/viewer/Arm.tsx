@@ -12,6 +12,7 @@ import { useRef } from "react";
 import type { Group } from "three";
 import { useFrame } from "@react-three/fiber";
 import { useTelemetryStore } from "../state/telemetry";
+import { useReplayStore } from "../replay/ReplayStore";
 import { braccioDegreesToUrdfRadians } from "../state/urdf";
 
 // Link lengths in metres — identical to braccio.urdf (which in turn
@@ -40,7 +41,15 @@ export function Arm() {
   const rightFingerRef = useRef<Group>(null);
 
   useFrame(() => {
-    const js = useTelemetryStore.getState().joints;
+    // Source multiplex: when the Replay tab is the active source and
+    // has ticks loaded, it owns the arm pose; otherwise we read from
+    // the live telemetry stream as before. Arm.tsx stays the single
+    // visual authority either way — no ghost second arm.
+    const replay = useReplayStore.getState();
+    let js = useTelemetryStore.getState().joints;
+    if (replay.active && replay.ticks.length > 0) {
+      js = replay.ticks[replay.cursor].joints;
+    }
     // URDF joint axes (see braccio.urdf):
     //   joint_base       → Z   (vertical "twist" of the whole arm)
     //   joint_shoulder   → Y

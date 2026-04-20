@@ -449,6 +449,8 @@ class SafetyAPI:
     # ── Diagnostics ────────────────────────────────────────────────────────
 
     def snapshot(self) -> dict:
+        detour = list(getattr(self.bb, "sweep_detour_path", []) or [])
+        detour_idx = int(getattr(self.bb, "sweep_detour_idx", 0) or 0)
         return {
             "mode": self.bb.mode,
             "bt_state": self.bb.bt_state,
@@ -459,6 +461,8 @@ class SafetyAPI:
             "sweep_target_deg": self.bb.sweep_target_deg,
             "sweep_z_index": int(getattr(self.bb, "sweep_z_index", 0) or 0),
             "sweep_z_origin": int(getattr(self.bb, "sweep_z_origin", 0) or 0),
+            "sweep_detour_path": [list(q) for q in detour],
+            "sweep_detour_idx": detour_idx,
             "polar_blocked": self.bb.polar_snapshot,
             "world": self.world.snapshot(),
             "queue_length": len(self.bb.sequence_queue or []),

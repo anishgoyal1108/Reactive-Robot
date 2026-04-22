@@ -23,8 +23,10 @@ ToF / IR Integration:
 
 import atexit
 import curses
+import logging
 import queue
 import signal
+import sys
 import time
 
 # ── Display adapters ──────────────────────────────────────────────────────
@@ -81,6 +83,7 @@ from .tof_sensor import ToFState, ToFBridge, ObstacleResponse
 from .imu_state import IMUState
 from .data_publisher import DataPublisher
 from .session_logger import SessionLogger
+from .rl_recorder import RLRecorder
 from .safety import (
     RefusalDialog,
     SafetyAPI,
@@ -205,6 +208,16 @@ class BraccioController:
             tof_state=self._tof_state,
             safety=self._safety,
         )
+        # ── RL transition recorder (writes logs/rl_transitions_*.npz) ───
+        # Stage 0 data collection — see Data_Collection_Guide.pdf. No
+        # obstacle_map arg since the legacy ObstacleMap was removed in
+        # the safety-stack refactor; rl_recorder tolerates None.
+        self._rl_recorder = RLRecorder(
+            arm_state=self._state,
+            tof_state=self._tof_state,
+            imu_state=self._imu_state,
+            obstacle_map=None,
+        )
         # Track BT state transitions for edge-triggered events
         self._prev_bt_mode = "idle"
         self._prev_obs_response = "clear"
@@ -250,6 +263,29 @@ class BraccioController:
         # else — that mismatch is what causes the "jerks on restart"
         # behaviour the user reported.
         self._await_pos_sync(timeout_s=1.5)
+
+        # Give the Teensy a brief window to stream its first ToF frames so
+        # the recorder's initial ticks see real grids instead of the
+        # ``grids=[None]*4 → np.ones`` sentinel. Best-effort only — if no
+        # Teensy is configured this just sleeps 0.3 s and moves on.
+        if self._teensy_port:
+            import time as _t
+            _deadline = _t.monotonic() + 0.8
+            while _t.monotonic() < _deadline:
+                snap = self._tof_state.snapshot()
+                if any(snap.get("frame_cnt", [])):
+                    break
+                _t.sleep(0.05)
+
+        # Start RL transition recorder AFTER polar + ToF are warm. Otherwise
+        # the first ~15 transitions would record stale defaults
+        # (theta=90, r=152, z=-50) and ones-valued ToF grids — polluting
+        # calibrate_noise's early-sample statistics.
+        try:
+            self._rl_recorder.start()
+        except Exception as exc:
+            with self._state._lock:
+                self._state.last_error = f"rl_recorder: {exc}"
 
         # Start the safety stack's behavior tree daemon.
         self._safety.start()
@@ -326,6 +362,20 @@ class BraccioController:
             safety_snap = self._safety.snapshot()
             with self._state._lock:
                 self._state.tof_snapshot = tof_snap
+
+            # Surface recorder health in the status line so the user can
+            # tell at a glance whether transitions are still accumulating
+            # during a walk-away collection session.
+            rec_st = self._rl_recorder.status()
+            with self._state._lock:
+                if rec_st["tick_fatal"]:
+                    self._state.last_error = f"REC FATAL: {rec_st['tick_fatal']}"
+                elif rec_st["last_save_error"]:
+                    self._state.last_error = f"REC SAVE ERR: {rec_st['last_save_error']}"
+                elif rec_st["running"]:
+                    # Use last_resp so a session_logger "log: …" line from
+                    # startup doesn't get stuck on-screen for 75 minutes.
+                    self._state.last_resp = f"rec {rec_st['buffered']} samp"
 
             arm_snap = self._state.snapshot()
             display.render(
@@ -1048,6 +1098,36 @@ class BraccioController:
             self._logger.stop()
         except Exception:
             pass
+        # RL recorder — this is the one-shot data collection artifact, so
+        # surface success + failure loudly. curses is torn down by the time
+        # _graceful_shutdown runs (wrapper has restored the terminal), so
+        # plain print() is safe and visible. Logging also lands in
+        # logs/controller.log via the __main__ basicConfig.
+        try:
+            self._rl_recorder.stop()
+        except Exception as exc:
+            print(f"\nERROR: rl_recorder flush failed: {exc}", file=sys.stderr)
+            logging.getLogger(__name__).exception(
+                "rl_recorder.stop() failed during shutdown"
+            )
+        else:
+            st = self._rl_recorder.status()
+            if st["last_save_path"]:
+                print(
+                    f"\n✓ RL transitions saved: {st['last_save_count']} "
+                    f"→ {st['last_save_path']}"
+                )
+            elif st["tick_fatal"]:
+                print(
+                    f"\nERROR: rl_recorder crashed before saving: {st['tick_fatal']}",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "\nWARNING: rl_recorder stopped with 0 transitions buffered — "
+                    "nothing was written. Check logs/controller.log.",
+                    file=sys.stderr,
+                )
         try:
             self._bridge.close()
         except Exception:

@@ -435,7 +435,7 @@ def _static_check(program, state_lib: StateLibrary) -> list:
 # Reused by the curses renderer — matches the legacy two-token line
 # format so lines that look valid in the old grammar get the green
 # highlight. Anything else falls back to extended-DSL highlighting.
-_RE_LEGACY_MOVE = re.compile(r"^([A-Z_][A-Z0-9_]*)\s+(\d+)$")
+_RE_LEGACY_MOVE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s+(\d+)$")
 _RE_LEGACY_REPEAT = re.compile(r"^REPEAT\s+\d+$", re.IGNORECASE)
 
 

@@ -28,8 +28,8 @@ from typing import List, Tuple
 from .ast_nodes import MoveStmt, Program, RepeatBlock
 
 _RE_REPEAT = re.compile(r"^REPEAT\s+(\d+)$", re.IGNORECASE)
-_RE_MOVE = re.compile(r"^([A-Z_][A-Z0-9_]*)\s+(\d+)$")
-_RE_UPPER_IDENT = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+_RE_MOVE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s+(\d+)$")
+_RE_UPPER_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # Tokens that unambiguously mean "this is not a legacy file".
 _NEW_KEYWORDS = frozenset(

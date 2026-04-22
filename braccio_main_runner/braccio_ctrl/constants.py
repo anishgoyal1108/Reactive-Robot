@@ -8,6 +8,7 @@ Edit link lengths here if your Braccio build differs from the standard:
 """
 
 import curses
+import os
 
 # ── Link lengths (mm) ─────────────────────────────────────────────────────
 L1 = 125.0
@@ -92,9 +93,15 @@ PLOT_KEY_LOG = "t"  # toggle CSV logging
 PLOT_KEY_MAIN_TOGGLE = "0"  # hide/show main combined window
 # keys '1'–'6' toggle individual per-joint pop-out windows (hardcoded in plotter)
 PLOT_Y_MARGIN_DEG = 10  # extra degrees above/below joint limits on y-axis
-LOG_DIR = "logs"
-SCREENSHOT_DIR = "screenshots"
-SESSION_LOG_DIR = "session_logs"  # JSONL telemetry for offline review
+# Absolute paths anchored at the package parent (braccio_main_runner/) so
+# logs land in the same place no matter where the controller was launched
+# from. Consumed by rl_recorder, session_logger, and tof CSV logger — if any
+# of those see a relative path via cwd drift, a one-shot data collection
+# session could land NPZ files in an unexpected directory.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LOG_DIR = os.path.join(_PROJECT_ROOT, "logs")
+SCREENSHOT_DIR = os.path.join(_PROJECT_ROOT, "screenshots")
+SESSION_LOG_DIR = os.path.join(_PROJECT_ROOT, "session_logs")  # JSONL telemetry for offline review
 SESSION_LOG_HZ = 10  # telemetry sample rate (Hz)
 # Opt-in geometry emission for the session-replay visualiser. When True,
 # each tick includes world_points (capped list of [x,y,z] obstacle points

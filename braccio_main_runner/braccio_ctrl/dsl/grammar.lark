@@ -98,7 +98,7 @@ RBRACE: "}"
 LBRACK: "["
 RBRACK: "]"
 
-IDENT.-1: /[A-Z_][A-Z0-9_]*/
+IDENT.-1: /[A-Za-z_][A-Za-z0-9_]*/
 
 %import common.INT
 %import common.SIGNED_NUMBER

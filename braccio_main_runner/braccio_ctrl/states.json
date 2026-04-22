@@ -350,5 +350,68 @@
     "wrist_offset": 20.0,
     "wrist_rot": 5,
     "gripper": 73
+  },
+  "seq_low": {
+    "joints": [90, 68, 43, 20, 5, 73],
+    "theta": 90.0,
+    "r": 152.0,
+    "z": 0.0,
+    "wrist_offset": 20.0,
+    "wrist_rot": 5,
+    "gripper": 73
+  },
+  "seq_close": {
+    "joints": [90, 147, 29, 20, 5, 73],
+    "theta": 90.0,
+    "r": 80.0,
+    "z": 60.0,
+    "wrist_offset": 20.0,
+    "wrist_rot": 5,
+    "gripper": 73
+  },
+  "seq_far": {
+    "joints": [90, 67, 86, 20, 5, 73],
+    "theta": 90.0,
+    "r": 220.0,
+    "z": 60.0,
+    "wrist_offset": 20.0,
+    "wrist_rot": 5,
+    "gripper": 73
+  },
+  "corner_tl": {
+    "joints": [30, 104, 64, 20, 5, 73],
+    "theta": 30.0,
+    "r": 152.0,
+    "z": 95.0,
+    "wrist_offset": 20.0,
+    "wrist_rot": 5,
+    "gripper": 73
+  },
+  "corner_tr": {
+    "joints": [150, 104, 64, 20, 5, 73],
+    "theta": 150.0,
+    "r": 152.0,
+    "z": 95.0,
+    "wrist_offset": 20.0,
+    "wrist_rot": 5,
+    "gripper": 73
+  },
+  "corner_bl": {
+    "joints": [30, 68, 43, 20, 5, 73],
+    "theta": 30.0,
+    "r": 152.0,
+    "z": 0.0,
+    "wrist_offset": 20.0,
+    "wrist_rot": 5,
+    "gripper": 73
+  },
+  "corner_br": {
+    "joints": [150, 68, 43, 20, 5, 73],
+    "theta": 150.0,
+    "r": 152.0,
+    "z": 0.0,
+    "wrist_offset": 20.0,
+    "wrist_rot": 5,
+    "gripper": 73
   }
 }

@@ -16,6 +16,8 @@ Live matplotlib plots are provided by standalone companion scripts
 """
 
 import argparse
+import logging
+import os
 import sys
 
 from .serial_bridge import SerialBridge, ensure_serial_device_path
@@ -27,10 +29,32 @@ from .constants import (
     TOF_BAUD_RATE,
     ARM_DATA_PORT,
     TOF_DATA_PORT,
+    LOG_DIR,
 )
 
 
+def _configure_logging() -> str:
+    """Route every module's ``log.info`` / ``log.exception`` to a file.
+
+    curses owns the terminal once the controller runs, so a StreamHandler
+    would be invisible. We write to ``logs/controller.log`` instead — the
+    recorder's start/tick/save messages and any failures in the safety
+    stack land there, and the user can tail it post-session.
+    """
+    os.makedirs(LOG_DIR, exist_ok=True)
+    log_path = os.path.join(LOG_DIR, "controller.log")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[logging.FileHandler(log_path)],
+        force=True,  # override any library that called basicConfig first
+    )
+    return log_path
+
+
 def main() -> None:
+    log_path = _configure_logging()
+    print(f"Log file: {log_path}")
     parser = argparse.ArgumentParser(
         prog="python -m braccio_ctrl",
         description="Braccio Arm IK Keyboard Controller + ToF/IR Sensing",

@@ -56,6 +56,12 @@ RECORD_HZ          = SWEEP_TICK_HZ       # matches BT_TICK_HZ (20 Hz)
 MAX_FILE_BYTES     = 50 * 1024 * 1024    # 50 MB per file
 N_FEEDBACK_STEPS   = 20                  # last N transitions adjusted on +/- key
 OBS_DIM            = 74                  # obs vector length (see module docstring)
+# Stop the tick loop after this many consecutive _tick() exceptions. Protects
+# against a silent bug producing an empty NPZ across a 75-minute session: if
+# the first tick crashes because of (say) a missing snapshot key, every tick
+# will crash the same way — better to bail and surface the error than log
+# 45,000 copies of the same traceback to /dev/null.
+_MAX_CONSECUTIVE_ERRORS = 10             # ~1 s at RECORD_HZ=10, ~0.5 s at 20
 
 
 def _encode_obs(arm_snap: dict, tof_snap: dict, obs_snap: dict,
@@ -239,6 +245,14 @@ class RLRecorder:
         self._prev_z:     Optional[float]      = None
         self._prev_delta: Optional[int]        = None
 
+        # Surfaced via status() so the controller's UI + shutdown path can
+        # tell the user whether the session actually wrote a valid NPZ.
+        self.last_save_path:  Optional[str] = None
+        self.last_save_count: int           = 0
+        self.last_save_error: Optional[str] = None
+        self._tick_fatal:     Optional[str] = None
+        self._consecutive_errors: int       = 0
+
         os.makedirs(LOG_DIR, exist_ok=True)
 
     # ── Public API ────────────────────────────────────────────────────────
@@ -280,6 +294,22 @@ class RLRecorder:
         """Attach an AutoSweeper / RLSweeper for Z-mask + direction features."""
         self._sweeper = sweeper
 
+    def status(self) -> dict:
+        """Snapshot recorder health for the controller's display + shutdown.
+
+        Cheap — read under the same lock the tick loop writes under. Called
+        at screen-refresh cadence during the session and once at shutdown.
+        """
+        with self._lock:
+            return {
+                "running":         bool(self._thread and self._thread.is_alive()),
+                "buffered":        len(self._obs_buf),
+                "last_save_path":  self.last_save_path,
+                "last_save_count": self.last_save_count,
+                "last_save_error": self.last_save_error,
+                "tick_fatal":      self._tick_fatal,
+            }
+
     # ── Recording loop ────────────────────────────────────────────────────
 
     def _record_loop(self) -> None:
@@ -288,8 +318,20 @@ class RLRecorder:
             t0 = time.monotonic()
             try:
                 self._tick()
-            except Exception:
-                log.exception("RLRecorder tick error")
+                self._consecutive_errors = 0
+            except Exception as exc:
+                self._consecutive_errors += 1
+                log.exception(
+                    "RLRecorder tick error (%d/%d)",
+                    self._consecutive_errors, _MAX_CONSECUTIVE_ERRORS,
+                )
+                if self._consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
+                    self._tick_fatal = f"{type(exc).__name__}: {exc}"
+                    log.error(
+                        "RLRecorder giving up after %d consecutive tick errors",
+                        _MAX_CONSECUTIVE_ERRORS,
+                    )
+                    self._stop.set()
             elapsed = time.monotonic() - t0
             self._stop.wait(max(0.0, tick - elapsed))
 
@@ -297,7 +339,13 @@ class RLRecorder:
         now = time.time()
         arm_snap = self._arm.snapshot()
         tof_snap = self._tof.snapshot()
-        obs_snap = self._obs_map.snapshot()
+        # obstacle_map is optional — after the safety-stack refactor the old
+        # ObstacleMap was removed. Fall back to an empty snapshot so obs_feat
+        # fills with zeros rather than NaN.
+        if self._obs_map is not None:
+            obs_snap = self._obs_map.snapshot()
+        else:
+            obs_snap = {}
 
         theta = arm_snap['theta']
         r     = arm_snap['r']
@@ -322,12 +370,21 @@ class RLRecorder:
         )
 
         if self._prev_obs is not None:
-            # Compute 4D action: raw deltas (normalized by caller when used in training)
+            # Compute 4D action: raw deltas (normalized by caller in training).
+            # Explicit None-checks instead of ``or`` shortcircuit — the old
+            # ``(self._prev_z or z)`` treated prev_z=0.0 as "no previous"
+            # and erased the delta. collect_seq.txt visits z=0 waypoints
+            # (seq_low, corner_bl, corner_br) every cycle, so that bug
+            # corrupted every transition leaving those poses.
+            prev_theta = theta if self._prev_theta is None else self._prev_theta
+            prev_r     = r     if self._prev_r     is None else self._prev_r
+            prev_z     = z     if self._prev_z     is None else self._prev_z
+            prev_delta = delta if self._prev_delta is None else self._prev_delta
             action = np.array([
-                theta - (self._prev_theta or theta),
-                r     - (self._prev_r     or r),
-                z     - (self._prev_z     or z),
-                float(delta - (self._prev_delta or delta)),
+                theta - prev_theta,
+                r     - prev_r,
+                z     - prev_z,
+                float(delta - prev_delta),
             ], dtype=np.float32)
 
             with self._lock:
@@ -375,12 +432,25 @@ class RLRecorder:
 
         stamp = time.strftime('%Y%m%d_%H%M%S')
         path  = os.path.join(LOG_DIR, f'rl_transitions_{stamp}.npz')
-        np.savez_compressed(
-            path,
-            obs=obs, actions=actions, rewards=rewards,
-            next_obs=next_obs, dones=dones,
-            theta=theta, r=r_arr, z=z_arr, timestamps=ts,
-        )
+        try:
+            # Ensure the dir exists in case something deleted it mid-session.
+            os.makedirs(LOG_DIR, exist_ok=True)
+            np.savez_compressed(
+                path,
+                obs=obs, actions=actions, rewards=rewards,
+                next_obs=next_obs, dones=dones,
+                theta=theta, r=r_arr, z=z_arr, timestamps=ts,
+            )
+        except Exception as exc:
+            self.last_save_error = f"{type(exc).__name__}: {exc}"
+            log.exception(
+                "RLRecorder _flush FAILED (%d transitions would be lost) path=%s",
+                n, path,
+            )
+            raise
+        self.last_save_path  = path
+        self.last_save_count = n
+        self.last_save_error = None
         log.info("RLRecorder saved %d transitions → %s", n, path)
 
     def _clear_buffers(self) -> None:

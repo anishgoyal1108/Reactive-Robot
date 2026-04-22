@@ -428,13 +428,12 @@ class BraccioSimEnv(BraccioBaseEnv):
         ir_n = self._compute_ir_bits() / 3.0
 
         # ── Obstacle map summary (8) ─────────────────────────────────────────
-        obs_c = self._obs_center_mm()
-        obs_feat = np.array([
-            1.0,                          # has_active
-            0.0,                          # age (always fresh)
-            obs_c[0] / 200.0, obs_c[1] / 200.0, obs_c[2] / 100.0,  # centroid
-            obs_c[0] / 200.0, obs_c[1] / 200.0, obs_c[2] / 100.0,  # kalman ≈ centroid
-        ], dtype=np.float32)
+        # Zeroed to match hardware: obstacle_map=None on hardware produces
+        # has_active=0, age=1 (OBS_MAP_MAX_AGE_S/OBS_MAP_MAX_AGE_S), centroid/
+        # kalman=0. Keeping these informative in sim would train the policy on
+        # features that are constant zeros at deployment time.
+        obs_feat = np.array([0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                            dtype=np.float32)
 
         # ── Z reachability mask (5) ──────────────────────────────────────────
         z_mask = np.array([
@@ -450,7 +449,8 @@ class BraccioSimEnv(BraccioBaseEnv):
         ], dtype=np.float32)
 
         # ── Forbidden theta band (4) ─────────────────────────────────────────
-        forbidden = self._compute_forbidden_band()
+        # Zeroed to match hardware (obstacle_map=None → all zeros at deploy time).
+        forbidden = np.zeros(4, dtype=np.float32)
 
         return np.concatenate([
             [theta_n, r_n, z_n, dir_to_goal, delta_n],  # 5

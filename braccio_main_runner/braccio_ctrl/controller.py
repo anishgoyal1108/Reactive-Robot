@@ -159,6 +159,7 @@ class BraccioController:
         sensor_backend=None,
         tof_state: "ToFState | None" = None,
         imu_state: "IMUState | None" = None,
+        rl_policy_path: str | None = None,
     ):
         # Arm backend — either injected (sim) or built from port (hardware).
         self._bridge: BraccioBackend = arm_backend or HardwareBackend(port, baud)
@@ -218,6 +219,10 @@ class BraccioController:
             imu_state=self._imu_state,
             obstacle_map=None,
         )
+        # RL deployment (optional — only active when --rl-policy is passed)
+        self._rl_policy_path = rl_policy_path
+        self._rl_sweeper = None          # built lazily in _curses_main
+
         # Track BT state transitions for edge-triggered events
         self._prev_bt_mode = "idle"
         self._prev_obs_response = "clear"
@@ -289,6 +294,27 @@ class BraccioController:
 
         # Start the safety stack's behavior tree daemon.
         self._safety.start()
+
+        # If a trained RL policy was passed via --rl-policy, build an RLSweeper
+        # so the Z key drives the RL policy instead of the safety BT sweep.
+        if self._rl_policy_path:
+            try:
+                from stable_baselines3 import SAC
+                from .rl_sweeper import AtomicPolicyRef, RLSweeper
+                _policy = SAC.load(self._rl_policy_path)
+                self._rl_policy_ref = AtomicPolicyRef(_policy)
+                self._rl_sweeper = RLSweeper(
+                    arm_state=self._state,
+                    bridge=self._bridge,
+                    tof_state=self._tof_state,
+                    obstacle_map=None,
+                    policy_ref=self._rl_policy_ref,
+                )
+                with self._state._lock:
+                    self._state.last_resp = f"RL policy ready: {self._rl_policy_path}"
+            except Exception as exc:
+                with self._state._lock:
+                    self._state.last_error = f"RL policy load failed: {exc}"
 
         # Auto-calibrate the IMU before the main loop can ingest any ToF
         # frames. Without this, the cached rotation matrix defaults to an
@@ -725,15 +751,26 @@ class BraccioController:
             return
         # ── Autonomous sweep ──────────────────────────────────────────────
         if action == "sweep_toggle":
-            safety_snap = self._safety.snapshot()
-            if safety_snap.get("mode") == "sweep":
-                self._safety.stop_sweep()
-                with self._state._lock:
-                    self._state.last_resp = "Sweep stopped"
+            if self._rl_sweeper is not None:
+                # RL policy mode: Z key drives RLSweeper, not the safety BT.
+                if self._rl_sweeper.running():
+                    self._rl_sweeper.stop()
+                    with self._state._lock:
+                        self._state.last_resp = "RL sweep stopped"
+                else:
+                    self._rl_sweeper.start()
+                    with self._state._lock:
+                        self._state.last_resp = "RL sweep started"
             else:
-                self._safety.start_sweep()
-                with self._state._lock:
-                    self._state.last_resp = "Sweep started"
+                safety_snap = self._safety.snapshot()
+                if safety_snap.get("mode") == "sweep":
+                    self._safety.stop_sweep()
+                    with self._state._lock:
+                        self._state.last_resp = "Sweep stopped"
+                else:
+                    self._safety.start_sweep()
+                    with self._state._lock:
+                        self._state.last_resp = "Sweep started"
             return
         # ── IMU calibration ───────────────────────────────────────────────
         if action == "imu_calibrate":
@@ -1084,6 +1121,11 @@ class BraccioController:
         if getattr(self, "_shutdown_done", False):
             return
         self._shutdown_done = True
+        try:
+            if getattr(self, "_rl_sweeper", None) is not None:
+                self._rl_sweeper.stop()
+        except Exception:
+            pass
         try:
             self._safety.stop()
         except Exception:

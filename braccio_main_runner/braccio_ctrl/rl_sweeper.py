@@ -241,7 +241,7 @@ class RLSweeper:
     def _build_obs(self, goal: dict) -> np.ndarray:
         arm_snap = self._arm_state.snapshot()
         tof_snap = self._tof_state.snapshot()
-        obs_snap = self._obstacle_map.snapshot()
+        obs_snap = self._obstacle_map.snapshot() if self._obstacle_map is not None else {}
         return _encode_obs(
             arm_snap     = arm_snap,
             tof_snap     = tof_snap,

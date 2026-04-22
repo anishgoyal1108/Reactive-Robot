@@ -106,6 +106,16 @@ def main() -> None:
             "Use this when the IR wiring is loose or producing false positives."
         ),
     )
+    parser.add_argument(
+        "--rl-policy",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a trained SAC policy .zip to enable RL sweep mode. "
+            "When set, the Z key starts/stops an RLSweeper instead of the "
+            "safety BT sweep. Train with train_rl.py first."
+        ),
+    )
     args = parser.parse_args()
 
     try:
@@ -157,6 +167,7 @@ def main() -> None:
         teensy_port=str(teensy_port) if teensy_port else "",
         teensy_baud=args.teensy_baud,
         enable_ir=not args.no_ir,
+        rl_policy_path=args.rl_policy,
     )
 
     try:

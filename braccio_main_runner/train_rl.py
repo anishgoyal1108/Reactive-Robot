@@ -109,9 +109,7 @@ def train(
     Returns path to the best saved model checkpoint.
     """
     from stable_baselines3 import SAC
-    from stable_baselines3.common.callbacks import (
-        EvalCallback, StopTrainingOnRewardThreshold,
-    )
+    from stable_baselines3.common.callbacks import EvalCallback
     from stable_baselines3.common.vec_env import DummyVecEnv
 
     # ── Environments ─────────────────────────────────────────────────────────
@@ -154,8 +152,13 @@ def train(
     # ── Callbacks ─────────────────────────────────────────────────────────────
     os.makedirs(best_dir, exist_ok=True)
 
-    stop_cb = StopTrainingOnRewardThreshold(reward_threshold=50.0, verbose=1)
-
+    # Early-stopping on mean reward is DISABLED. With the replan + half-
+    # sweep bonuses introduced in rl_reward.py (Fix F/H), the previous
+    # threshold=50 triggered at 10% of the budget because the policy
+    # harvested half-sweep bonuses in free-sweep episodes without ever
+    # learning on-path replan behavior. The only signal that actually
+    # tells you if the policy works is the behavioural test_replan.py,
+    # run AFTER training completes. Let 1M steps run.
     eval_cb = EvalCallback(
         eval_env,
         best_model_save_path = best_dir,
@@ -164,7 +167,6 @@ def train(
         n_eval_episodes      = eval_episodes,
         deterministic        = True,
         render               = False,
-        callback_on_new_best = stop_cb,
     )
 
     # ── Train ─────────────────────────────────────────────────────────────────

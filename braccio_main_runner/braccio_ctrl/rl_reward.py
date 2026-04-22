@@ -97,25 +97,25 @@ JERK_GAIN_Z          = 0.01    # |Δaction[2]|  z
 # when an obstacle is close. Without this term the speed + proximity
 # penalties converge to "stop" as Pareto-optimal — moving earns a
 # penalty, stopping earns nothing. This bonus makes continuing to sweep
-# around the obstacle strictly better than freezing. Coefficient was
-# sized to beat the combined proximity + speed-limit penalty at
-# typical obstacle distances (~50 mm), verified by the test harness
-# at the bottom of this module: maneuver reward should be > freeze
-# reward when the obstacle is close.
-REPLAN_PROGRESS_COEFF    = 1.50
+# around the obstacle strictly better than freezing.
+#
+# Coefficients retuned after the first retrain plateaued with the
+# policy exploiting half-sweep bonuses in free-sweep episodes while
+# still freezing on on-path episodes. The recovery bonus is now the
+# DOMINANT on-path reward (+5 per successful clear) so SAC can't
+# plateau at "stop near obstacles, sweep when clear" — on-path
+# success must be worth comparable to free-sweep success.
+REPLAN_PROGRESS_COEFF    = 2.00
 REPLAN_OBSTACLE_THRESH_N = 0.40   # obs cell < 0.40 (= 100 mm for CH0/CH1) → "close"
-# Additional bonus when the action SUCCESSFULLY reduces obstacle
-# proximity (i.e., obstacle was close in obs and is further in
-# next_obs). Gives extra credit for effective avoidance maneuvers.
-REPLAN_RECOVERY_BONUS    = 0.50
+REPLAN_RECOVERY_BONUS    = 5.00   # one-shot, fires when obstacle clears
 
 # Fix H: Sweep-cycle completion bonus. Delivered by the sim env each
 # time the arm crosses θ=90 from one side to the other without
-# colliding. Gives SAC a dense terminal signal for the actual task
-# (continuous obstacle-aware sweeping) rather than only "reach this
-# random goal once." The info dict from BraccioSimEnv._apply_action
-# surfaces 'half_sweep_completed' per step when a crossing just fired.
-HALF_SWEEP_BONUS     = 2.50   # per half-sweep (two halves = full 0↔180 cycle)
+# colliding. Reduced from 2.5 → 1.0 because at 2.5 the free-sweep case
+# dominated the expected-reward surface and SAC ignored on-path
+# episodes entirely. The bonus is still meaningful but no longer the
+# only way to earn large reward.
+HALF_SWEEP_BONUS     = 1.00
 
 
 # ── Helpers: un-normalise obs fields ────────────────────────────────────────

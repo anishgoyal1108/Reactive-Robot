@@ -282,18 +282,6 @@ class RLRecorder:
             for i in range(1, n + 1):
                 self._rew_buf[-i] += delta
 
-    def set_goal(self, goal: Optional[dict]) -> None:
-        """
-        Update the active goal pose used to fill the goal-delta feature.
-        Pass None to clear (obs goal delta falls back to zeros, which the
-        network reads as "no active goal" — suitable for free sweep).
-        """
-        self._goal_state = goal
-
-    def set_sweeper(self, sweeper) -> None:
-        """Attach an AutoSweeper / RLSweeper for Z-mask + direction features."""
-        self._sweeper = sweeper
-
     def status(self) -> dict:
         """Snapshot recorder health for the controller's display + shutdown.
 

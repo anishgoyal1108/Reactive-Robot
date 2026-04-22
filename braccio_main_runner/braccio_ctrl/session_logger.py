@@ -139,6 +139,7 @@ class SessionLogger:
         # Data sources (set via set_sources)
         self._arm_state = None
         self._tof_state = None
+        self._imu_state = None
         self._safety = None
 
         # Strategy-change tracker for last_strategy_entry_tick.
@@ -146,17 +147,22 @@ class SessionLogger:
 
     # ── Configuration ─────────────────────────────────────────────────────
 
-    def set_sources(self, arm_state, tof_state, safety=None, **_legacy) -> None:
+    def set_sources(self, arm_state, tof_state, safety=None,
+                     imu_state=None, **_legacy) -> None:
         """Attach the shared-state objects the logger samples from.
 
         ``safety`` replaces the legacy ``sweeper=`` argument — sweep /
         obstacle fields in each JSONL sample are now derived from the BT's
-        snapshot. ``**_legacy`` swallows the old ``sweeper=`` kwarg so callers
+        snapshot. ``imu_state`` adds IMU roll/pitch/accel fields to each
+        sample so the user can verify the IMU is live post-session
+        (previously the Teensy streamed IMU at 100 Hz but nothing logged
+        it). ``**_legacy`` swallows the old ``sweeper=`` kwarg so callers
         mid-migration don't crash.
         """
         self._arm_state = arm_state
         self._tof_state = tof_state
         self._safety = safety
+        self._imu_state = imu_state
 
     @property
     def path(self) -> str:
@@ -317,13 +323,57 @@ class SessionLogger:
         )
         self._prev_last_strategy = last_strategy
 
+        # Physical forward kinematics — where the tip ACTUALLY is per
+        # the probed joint convention, vs state.r/z which is the user's
+        # commanded IK target. These diverge because the CGx IK uses a
+        # different elbow/wrist sign than the physical Braccio.
+        joints_now = arm_snap.get("joints", [])
+        phys_tip_r = None
+        phys_tip_z = None
+        if joints_now and len(joints_now) >= 4:
+            try:
+                from .ik_solver import fk_tip_physical
+                _, phys_tip_r, phys_tip_z = fk_tip_physical(joints_now)
+                phys_tip_r = round(float(phys_tip_r), 2)
+                phys_tip_z = round(float(phys_tip_z), 2)
+            except Exception:
+                phys_tip_r = None
+                phys_tip_z = None
+
+        # IMU snapshot (null when no imu_state wired in). Logged so the
+        # user can verify the MPU-6050 is live and watch roll/pitch
+        # change as the arm moves — previously the Teensy streamed IMU
+        # at 100 Hz but nothing recorded it.
+        imu_snap_out = None
+        if self._imu_state is not None:
+            try:
+                imu_snap = self._imu_state.snapshot()
+                imu_snap_out = {
+                    "roll_deg":  round(float(imu_snap.get("roll_deg", 0.0)), 2),
+                    "pitch_deg": round(float(imu_snap.get("pitch_deg", 0.0)), 2),
+                    "yaw_deg":   round(float(imu_snap.get("yaw_deg", 0.0)), 2),
+                    "ax":        round(float(imu_snap.get("ax", 0.0)), 3),
+                    "ay":        round(float(imu_snap.get("ay", 0.0)), 3),
+                    "az":        round(float(imu_snap.get("az", 0.0)), 3),
+                    "calibrated": bool(imu_snap.get("calibrated", False)),
+                    "last_rx":   round(float(imu_snap.get("last_rx", 0.0)), 3),
+                }
+            except Exception:
+                imu_snap_out = None
+
         sample = {
             "t": round(now, 3),
             "t_rel": round(now - self._t0, 3),
-            "joints": arm_snap.get("joints", []),
+            "joints": joints_now,
             "theta": round(float(arm_snap.get("theta", 0.0)), 2),
             "r": round(float(arm_snap.get("r", 0.0)), 2),
             "z": round(float(arm_snap.get("z", 0.0)), 2),
+            # Physical tip position from physical-convention FK of joints.
+            # Use this for verifying actual arm position; state.r/z is
+            # the IK target (diverges from reality due to CGx math).
+            "phys_tip_r": phys_tip_r,
+            "phys_tip_z": phys_tip_z,
+            "imu": imu_snap_out,
             "tof": {
                 "grids": [_grid_to_list(g) for g in grids],
                 "active": list(tof_snap.get("active", [])),

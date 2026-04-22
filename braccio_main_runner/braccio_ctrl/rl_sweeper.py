@@ -65,10 +65,21 @@ class AtomicPolicyRef:
     Thread-safe policy container that allows seamless weight hot-swap.
     Python GIL makes the attribute rebinding atomic in CPython, so .predict()
     always reads a coherent policy reference.
+
+    Failure handling: on prediction exception the first failure is
+    log.error()'d (not just warning) and ``last_error`` is set so the
+    controller's UI can surface it. Subsequent identical failures are
+    rate-limited to one log every 100 calls so a crashed policy doesn't
+    spam the log. Zero action is returned as a safe default, which the
+    sweep tick applies — the arm stalls rather than lurches.
     """
+
+    _LOG_EVERY_N = 100
 
     def __init__(self, policy: Any = None):
         self._policy = policy
+        self.last_error: str | None = None
+        self._error_count: int = 0
 
     def predict(self, obs: np.ndarray, deterministic: bool = True) -> np.ndarray:
         p = self._policy
@@ -76,14 +87,29 @@ class AtomicPolicyRef:
             return np.zeros(4, dtype=np.float32)
         try:
             action, _ = p.predict(obs, deterministic=deterministic)
-            return np.asarray(action, dtype=np.float32).reshape(-1)
+            arr = np.asarray(action, dtype=np.float32).reshape(-1)
+            if not np.all(np.isfinite(arr)):
+                raise ValueError(f"policy produced non-finite action: {arr.tolist()}")
+            self.last_error = None  # clear on success after a failure
+            return arr
         except Exception as exc:
-            log.warning("Policy.predict() failed: %s — falling back to zero action", exc)
+            err = f"{type(exc).__name__}: {exc}"
+            self._error_count += 1
+            if self._error_count == 1 or self._error_count % self._LOG_EVERY_N == 0:
+                log.error(
+                    "RLSweeper policy.predict() failed [#%d]: %s — "
+                    "arm will stall until this is fixed. Check the policy "
+                    "model path and the obs vector shape.",
+                    self._error_count, err,
+                )
+            self.last_error = err
             return np.zeros(4, dtype=np.float32)
 
     def swap(self, new_policy: Any) -> None:
         """Atomic replace (CPython GIL guarantees this single assignment is atomic)."""
         self._policy = new_policy
+        self._error_count = 0
+        self.last_error = None
 
 
 # ── Main sweeper ──────────────────────────────────────────────────────────────
@@ -122,6 +148,9 @@ class RLSweeper:
         self._obstacle_map = obstacle_map
         self._policy_ref   = policy_ref
         self._trainer      = trainer
+        # Public read-only view — the controller's UI checks
+        # ``policy_ref.last_error`` to surface prediction failures.
+        self.policy_ref = policy_ref
 
         self.tick_hz = float(tick_hz)
 
@@ -267,13 +296,12 @@ class RLSweeper:
             return False
 
         with self._arm_state._lock:
-            wrist_off = self._arm_state.wrist_offset
             wrist_rot = self._arm_state.wrist_rot
             gripper   = self._arm_state.gripper
             self._arm_state.theta = theta
             self._arm_state.r     = r
             self._arm_state.z     = z
-        self._arm_state.update_joints_from_ik(ik, wrist_off, wrist_rot, gripper)
+        self._arm_state.update_joints_from_ik(ik, wrist_rot, gripper)
 
         positions = self._arm_state.snapshot()['joints']
         cmd = cmd_set_all(positions)

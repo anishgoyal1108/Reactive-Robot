@@ -87,25 +87,57 @@ _GZ_LO, _GZ_HI = -50.0, 95.0    # goal z range (mm)
 _SWEEP_R_MM     = 152.0          # r used for sweep-style goals
 
 
+_DEFAULT_NOISE_PARAMS = {
+    "calibrated": False,
+    "servo_lag_factor": 0.92, "servo_lag_factor_std": 0.08,
+    "tof_noise_sigma_mm": 10.0, "tof_noise_sigma_std": 3.0,
+    "cell_dropout_rate": 0.15, "cell_dropout_rate_std": 0.05,
+    "domain_randomisation": {
+        "servo_lag_factor":  [0.80, 1.20],
+        "tof_noise_sigma_mm": [5.0, 15.0],
+        "cell_dropout_rate":  [0.05, 0.25],
+        "obstacle_radius_mm": [40.0, 120.0],
+        "obstacle_theta_deg": [20.0, 160.0],
+        "obstacle_r_mm":      [80.0, 200.0],
+        "obstacle_z_mm":      [-100.0, 100.0],
+    },
+}
+
+
 def _load_noise_params(path: Path) -> dict:
+    """Load sim noise params. Warn loudly if calibration hasn't been run.
+
+    Training on synthetic defaults silently is a common way to waste 4-6 h
+    of GPU and get a policy that fails on real hardware. We surface the
+    missing/uncalibrated state so the user has a chance to run
+    calibrate_noise.py first.
+    """
+    import logging
+    log = logging.getLogger(__name__)
     try:
         with open(path) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {
-            "servo_lag_factor": 0.92, "servo_lag_factor_std": 0.08,
-            "tof_noise_sigma_mm": 10.0, "tof_noise_sigma_std": 3.0,
-            "cell_dropout_rate": 0.15, "cell_dropout_rate_std": 0.05,
-            "domain_randomisation": {
-                "servo_lag_factor":  [0.80, 1.20],
-                "tof_noise_sigma_mm": [5.0, 15.0],
-                "cell_dropout_rate":  [0.05, 0.25],
-                "obstacle_radius_mm": [40.0, 120.0],
-                "obstacle_theta_deg": [20.0, 160.0],
-                "obstacle_r_mm":      [80.0, 200.0],
-                "obstacle_z_mm":      [-100.0, 100.0],
-            },
-        }
+            params = json.load(f)
+    except FileNotFoundError:
+        log.warning(
+            "noise_params.json NOT FOUND at %s — using synthetic defaults. "
+            "Run `python calibrate_noise.py` before training or the policy "
+            "won't match real hardware noise.", path,
+        )
+        return dict(_DEFAULT_NOISE_PARAMS)
+    except json.JSONDecodeError as exc:
+        log.error(
+            "noise_params.json at %s is malformed (%s). Using defaults — "
+            "DELETE and re-run calibrate_noise.py.", path, exc,
+        )
+        return dict(_DEFAULT_NOISE_PARAMS)
+    if not params.get("calibrated", False):
+        log.warning(
+            "noise_params.json has calibrated=false — file was created by "
+            "an earlier run but never populated with real measurements. "
+            "Run `python calibrate_noise.py logs/rl_transitions_*.npz` "
+            "before training.",
+        )
+    return params
 
 
 def _ray_sphere_hit(

@@ -314,6 +314,7 @@ class BraccioController:
                     tof_state=self._tof_state,
                     obstacle_map=None,
                     policy_ref=self._rl_policy_ref,
+                    safety_api=self._safety,   # enables stall fallback
                 )
                 with self._state._lock:
                     self._state.last_resp = f"RL policy ready: {self._rl_policy_path}"
@@ -402,12 +403,27 @@ class BraccioController:
             # Without this, a crashed policy just returns zero-actions and
             # the arm silently stalls on every press of Z.
             sweeper_err = None
+            sweeper_stalled = False
+            sweeper_stall_count = 0
             if self._rl_sweeper is not None:
                 sweeper_err = getattr(self._rl_sweeper.policy_ref,
                                        "last_error", None)
+                # Surface an RLSweeper stall too — the deterministic-
+                # policy infinite-loop bug used to look like "the arm
+                # just hangs" with no UI feedback. Stall counter is
+                # incremented on the sweeper's tick loop.
+                sweeper_stall_count = int(getattr(self._rl_sweeper,
+                                                    "_stall_count", 0))
+                sweeper_stalled = bool(getattr(self._rl_sweeper,
+                                                 "stall_warned", False))
             with self._state._lock:
                 if sweeper_err:
                     self._state.last_error = f"RL POLICY ERR: {sweeper_err}"
+                elif sweeper_stalled:
+                    self._state.last_error = (
+                        f"RL STALL: {sweeper_stall_count} ticks — "
+                        f"policy stuck; BT fallback engaging"
+                    )
                 elif rec_st["tick_fatal"]:
                     self._state.last_error = f"REC FATAL: {rec_st['tick_fatal']}"
                 elif rec_st["last_save_error"]:
@@ -772,6 +788,13 @@ class BraccioController:
                     with self._state._lock:
                         self._state.last_resp = "RL sweep stopped"
                 else:
+                    # Ensure the safety BT isn't running its own sweep —
+                    # otherwise both would be sending SET ALL commands.
+                    # Fix D (dual-writer guard, symmetric side).
+                    try:
+                        self._safety.stop_sweep()
+                    except Exception:
+                        pass
                     self._rl_sweeper.start()
                     with self._state._lock:
                         self._state.last_resp = "RL sweep started"
@@ -909,8 +932,24 @@ class BraccioController:
         state) is used to roll the state back — so the user sees "no
         motion + error message" instead of state drifting quietly to
         unreachable coordinates on every keypress.
+
+        When the RLSweeper is active, manual keypresses are refused —
+        both the sweeper and the BT's manual branch would race on the
+        serial bridge and the arm's UI state would desynchronize from
+        the hardware. Press Z to stop the sweep before steering manually.
+        (Fix D for the deployment dual-writer race.)
         """
         state = self._state
+        if self._rl_sweeper is not None and self._rl_sweeper.running():
+            if prev_polar is not None:
+                with state._lock:
+                    state.theta, state.r, state.z = prev_polar
+            with state._lock:
+                state.last_error = (
+                    "manual keypress ignored — RLSweeper is active. "
+                    "Press Z to stop the RL sweep first."
+                )
+            return
         with state._lock:
             theta = state.theta
             r = state.r

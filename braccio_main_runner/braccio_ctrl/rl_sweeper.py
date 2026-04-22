@@ -35,7 +35,7 @@ import numpy as np
 
 from typing import TYPE_CHECKING
 
-from .ik_solver     import solve_ik, polar_to_cartesian, reachability
+from .ik_solver     import solve_ik, polar_to_cartesian, reachability, fk_polar
 from .protocol      import cmd_set_all, cmd_set_delta
 from .rl_env        import BraccioBaseEnv, IR_STOP_THRESHOLD
 from .rl_recorder   import _encode_obs
@@ -45,6 +45,21 @@ from .constants import (
     DELTA_MIN, DELTA_MAX, R_MIN, R_MAX, Z_MIN, Z_MAX,
     IR_MIN, IR_MONITOR_HZ,
 )
+
+# Stall detector: after this many consecutive ticks where ``_send_move``
+# rejected the policy's target (unreachable or zero-motion), the sweeper
+# escalates to a safety-BT fallback plan so something moves. 40 ticks at
+# SWEEP_TICK_HZ (20 Hz) ~= 2 s — long enough to not churn on jitter, short
+# enough that the user doesn't perceive a long hang.
+_STALL_THRESHOLD      = 40
+# Log the first warning after this many consecutive stalls; then re-log
+# every ``_STALL_LOG_EVERY_N`` thereafter so the log doesn't get spammed.
+_STALL_LOG_FIRST      = 5
+_STALL_LOG_EVERY_N    = 100
+# Threshold below which a commanded pose is treated as "no motion" even
+# if reachability/IK nominally succeeded. Matches the ~0.5° joint
+# quantisation noise floor.
+_NO_MOTION_EPS        = 0.5  # mm / deg combined L-infinity on (θ, r, z)
 
 # Defer these imports to avoid pulling broken transitive deps at module load.
 # The rl_sweeper module only uses these as type hints + runtime duck-typing
@@ -138,6 +153,7 @@ class RLSweeper:
         obstacle_map: "ObstacleMap",
         policy_ref:   AtomicPolicyRef,
         trainer:      Optional[Any]  = None,
+        safety_api:   Optional[Any]  = None,
         tick_hz:      float          = SWEEP_TICK_HZ,
         sweep_theta_min: float = 0.0,
         sweep_theta_max: float = 180.0,
@@ -148,9 +164,18 @@ class RLSweeper:
         self._obstacle_map = obstacle_map
         self._policy_ref   = policy_ref
         self._trainer      = trainer
+        # Optional SafetyAPI handle — when the policy stalls for
+        # _STALL_THRESHOLD consecutive ticks we queue_manual_intent() on
+        # it to invoke the BT's cascading replanner. Without this the
+        # deterministic policy can infinite-loop on an unreachable target.
+        self._safety_api   = safety_api
         # Public read-only view — the controller's UI checks
         # ``policy_ref.last_error`` to surface prediction failures.
         self.policy_ref = policy_ref
+
+        # Stall tracking (fix for deterministic-policy infinite-loop bug).
+        self._stall_count:  int  = 0
+        self.stall_warned:  bool = False   # surfaced in controller status
 
         self.tick_hz = float(tick_hz)
 
@@ -281,6 +306,53 @@ class RLSweeper:
             goal_state   = goal,
         )
 
+    # ── Stall fallback (Fix B) ────────────────────────────────────────────────
+
+    def _dispatch_stall_fallback(self, arm_snap: dict) -> None:
+        """Queue a safety-BT manual intent that flips the sweep direction.
+
+        Called after ``_STALL_THRESHOLD`` consecutive stalls. The target is
+        a mid-workspace pose on the opposite side of the sweep arc, solved
+        via the same ``solve_ik`` the BT uses internally. The BT's
+        ``ManualBranch`` then runs the cascading replanner (polar-skip →
+        Z-ladder → BiRRT → direction-flip) to walk the arm there around
+        any known obstacles. Once achieved, BT returns to idle and the
+        policy resumes from the new pose — the deterministic stall is
+        broken because the policy now sees a different obs.
+        """
+        try:
+            # Flip sweep direction: aim for whichever endpoint is farther.
+            cur_theta = float(arm_snap.get('theta', 90.0))
+            target_theta = (self._sweep_theta_max
+                            if cur_theta < 90.0
+                            else self._sweep_theta_min)
+            # Mid-workspace reach at a known-safe z so the fallback plan is
+            # almost always reachable by the BT's replanner.
+            target_r = 150.0
+            target_z = 60.0
+            x, y = polar_to_cartesian(target_theta, target_r)
+            ik = solve_ik(x, y, target_z, theta_hint_deg=target_theta)
+            if ik is None:
+                log.error("RLSweeper stall fallback: IK failed for "
+                           "theta=%.0f r=%.0f z=%.0f — cannot escalate to BT",
+                           target_theta, target_r, target_z)
+                return
+            with self._arm_state._lock:
+                wrist_rot = self._arm_state.wrist_rot
+                gripper   = self._arm_state.gripper
+            fallback_q = [
+                int(ik.base), int(ik.shoulder), int(ik.elbow),
+                int(ik.wrist_vert), int(wrist_rot), int(gripper),
+            ]
+            log.warning(
+                "RLSweeper stall fallback: queueing safety-BT manual "
+                "intent to theta=%.0f (joints=%s)",
+                target_theta, fallback_q,
+            )
+            self._safety_api.queue_manual_intent(fallback_q)
+        except Exception as exc:
+            log.exception("RLSweeper stall fallback failed: %s", exc)
+
     # ── Motion primitives ─────────────────────────────────────────────────────
 
     def _send_move(self, theta: float, r: float, z: float) -> bool:
@@ -333,12 +405,30 @@ class RLSweeper:
                 self._stop.wait(max(0.0, tick - (time.monotonic() - t0)))
                 continue
 
+            # Observation state — derive polar from the arm's actual joint
+            # shadow so the policy can't drift from hardware reality when
+            # previous ticks had commands rejected. (Fix E: was reading
+            # state.theta/r/z, which are commanded-IK-parameter shadows and
+            # stay frozen on any _send_move reject.)
             arm_snap = self._arm_state.snapshot()
+            live_joints = list(arm_snap.get('joints', []) or [])
+            if len(live_joints) >= 4:
+                try:
+                    th_live, r_live, z_live = fk_polar(live_joints)
+                    arm_snap['theta'] = th_live
+                    arm_snap['r']     = r_live
+                    arm_snap['z']     = z_live
+                except Exception:
+                    pass   # keep whatever snapshot() returned
+
             goal     = self._effective_goal(arm_snap)
             obs      = self._build_obs(goal)
 
-            # Policy inference (atomic read via GIL)
-            action_n = self._policy_ref.predict(obs, deterministic=True)
+            # Policy inference. Stochastic at deployment so the policy
+            # can escape deterministic stall loops: the mean action may
+            # be unreachable or zero, but the sampled noise eventually
+            # produces a different action and something moves. (Fix A.)
+            action_n = self._policy_ref.predict(obs, deterministic=False)
             action_n = np.clip(action_n, -1.0, 1.0).astype(np.float32)
             raw      = BraccioBaseEnv.denormalize_action(action_n)
 
@@ -349,7 +439,45 @@ class RLSweeper:
             new_delta = int(np.clip(round(arm_snap['delta'] + raw[3]),
                                     DELTA_MIN, DELTA_MAX))
 
-            self._send_move(new_theta, new_r, new_z)
+            # Stall detection. A tick is a stall if _send_move rejected it
+            # OR the commanded target is ~identical to the current pose
+            # (policy produced near-zero action — "stopped").
+            move_eps = max(
+                abs(new_theta - arm_snap['theta']),
+                abs(new_r     - arm_snap['r']),
+                abs(new_z     - arm_snap['z']),
+            )
+            sent_ok = self._send_move(new_theta, new_r, new_z)
+            is_stall = (not sent_ok) or (move_eps < _NO_MOTION_EPS)
+
+            if is_stall:
+                self._stall_count += 1
+                # Log once at first crossing, then every N thereafter.
+                if (self._stall_count == _STALL_LOG_FIRST
+                        or self._stall_count % _STALL_LOG_EVERY_N == 0):
+                    log.warning(
+                        "RLSweeper stalled %d consecutive ticks "
+                        "(policy action unreachable or zero) — "
+                        "safety-BT fallback will engage at %d",
+                        self._stall_count, _STALL_THRESHOLD,
+                    )
+                    self.stall_warned = True
+                # Escalate to the safety BT's cascading replanner after
+                # the threshold. (Fix B.) The BT picks a detour around
+                # any known obstacles and walks the arm there; its
+                # manual-intent mode returns to idle once achieved, so
+                # the policy resumes on the next tick from a new pose
+                # — breaking the deterministic stall.
+                if (self._stall_count == _STALL_THRESHOLD
+                        and self._safety_api is not None):
+                    self._dispatch_stall_fallback(arm_snap)
+            else:
+                if self._stall_count >= _STALL_LOG_FIRST:
+                    log.info("RLSweeper recovered after %d stalled ticks",
+                             self._stall_count)
+                self._stall_count = 0
+                self.stall_warned = False
+
             self._send_delta(new_delta)
 
             # Online training: push transition

@@ -1,0 +1,33 @@
+# collect_seq.txt — Stage 0 Scenario 4 waypoint cycle.
+#
+# Referenced by Data_Collection_Guide.pdf §4. The sequence visits the
+# 11 named waypoints saved in states.json (seq_*, corner_*) so the RL
+# recorder captures real non-zero goal-delta observations as the BT
+# navigates between them. Place a cylindrical obstacle at
+# (theta≈60°, r≈150 mm, z≈60 mm) after cycle 1 to force replans
+# between seq_start and seq_mid (per the Guide).
+#
+# Total runtime: 6 cycles × 88 s/cycle ≈ 8.8 min.
+# Parsed by braccio_ctrl/dsl/parser.py. Comments (#) and blank lines
+# are ignored. Load via the sequence editor (X key), press F5 to run.
+
+REPEAT 6 {
+    # ── Front-left sweep plane ───────────────────────────────
+    MOVE seq_start   WAIT 8000
+    MOVE seq_low     WAIT 8000
+    MOVE seq_mid     WAIT 8000
+    MOVE seq_high    WAIT 8000
+
+    # ── Upper workspace corners ──────────────────────────────
+    MOVE corner_tl   WAIT 8000
+    MOVE corner_tr   WAIT 8000
+
+    # ── Right edge + extreme reaches ─────────────────────────
+    MOVE seq_end     WAIT 8000
+    MOVE seq_far     WAIT 8000
+    MOVE seq_close   WAIT 8000
+
+    # ── Lower workspace corners ──────────────────────────────
+    MOVE corner_br   WAIT 8000
+    MOVE corner_bl   WAIT 8000
+}

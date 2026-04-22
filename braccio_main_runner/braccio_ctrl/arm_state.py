@@ -21,7 +21,7 @@ an outer `with state._lock:` block in the controller without deadlocking.
 import threading
 from .constants import (
     HOME_POS, DELTA_DEFAULT,
-    DEFAULT_THETA, DEFAULT_R, DEFAULT_Z,
+    DEFAULT_THETA, DEFAULT_R, DEFAULT_Z, DEFAULT_WRIST_OFFSET,
     GRIPPER_CLOSE,
 )
 
@@ -39,8 +39,12 @@ class ArmState:
         self.z:     float = DEFAULT_Z       # height relative to shoulder, mm
 
         # ── Wrist state ───────────────────────────────────────────────────
-        # wrist_offset: manual tilt added on top of the auto-level angle
-        self.wrist_offset: float = 0.0
+        # wrist_offset: manual tilt added on top of the auto-level angle.
+        # Interpreted as the desired gripper world pitch = −wrist_offset
+        # (so offset=0 → horizontal; offset=−90 → vertical up; offset=+90
+        # → vertical down). Default is −90 to keep the gripper pointing
+        # straight up at startup, matching HOME_POS's physical pose.
+        self.wrist_offset: float = DEFAULT_WRIST_OFFSET
         self.wrist_rot:    int   = 90       # wrist rotation (independent)
 
         # ── Gripper ───────────────────────────────────────────────────────
@@ -53,7 +57,7 @@ class ArmState:
         self.equil_theta:        float = DEFAULT_THETA
         self.equil_r:            float = DEFAULT_R
         self.equil_z:            float = DEFAULT_Z
-        self.equil_wrist_offset: float = 0.0
+        self.equil_wrist_offset: float = DEFAULT_WRIST_OFFSET
         self.equil_wrist_rot:    int   = 90
         self.equil_gripper:      int   = GRIPPER_CLOSE
 
@@ -63,13 +67,19 @@ class ArmState:
         self.last_resp:  str  = ""
         self.last_error: str  = ""
 
-        # Startup latch: polar (theta/r/z) is synced from the Arduino's actual
-        # joint positions on the first POS response, then pinned. Subsequent
-        # POS responses only refresh `joints`. IK quantizes to integer servo
-        # angles, so re-deriving polar from every POS would leak ~1–10 mm
-        # of rounding drift per round trip — making right-arrow "also move
-        # down" or Q/E steps arrive off the commanded grid.
-        self.polar_synced: bool = False
+        # Polar (theta/r/z) is ALWAYS user-authoritative. We keep a flag for
+        # backward compatibility with the controller's _drain_responses path
+        # (which gates the one-shot fk_polar sync on first POS), but we
+        # default it to True so the sync never fires. Rationale: the sync
+        # ran fk_polar on the first POS response, but at DELTA=1 the Arduino
+        # is still transiting from HOME when that first POS arrives, so
+        # fk_polar(mid_flight_joints) produces bogus polar values and
+        # drives state into near-singular corners of the workspace. Every
+        # subsequent keypress then hits "IK unreachable" and locks up.
+        # Keeping polar at the software default (DEFAULT_THETA/R/Z) means
+        # keypresses operate on a stable virtual pose; the arm transits to
+        # that pose on first command.
+        self.polar_synced: bool = True
 
         # ── ToF / IR obstacle state (updated by controller) ─────────────
         self.obstacle_response: str   = 'clear'    # 'clear', 'replan', 'back_away'
@@ -79,19 +89,20 @@ class ArmState:
 
     # ── Mutations ─────────────────────────────────────────────────────────
 
-    def update_joints_from_ik(self, ik_result, wrist_offset: float,
+    def update_joints_from_ik(self, ik_result,
                                wrist_rot: int, gripper: int) -> None:
+        """Apply a solved IK result to the joint shadow array.
+
+        ``ik_result.wrist_vert`` was computed by ``solve_ik`` with the
+        caller-provided ``gripper_world_deg`` already baked in. We just
+        copy that WV through; no additional wrist_level_angle
+        recomputation is needed.
         """
-        Apply a solved IK result to the joint shadow array.
-        Applies wrist_offset on top of the auto-level angle.
-        """
-        from .ik_solver import wrist_level_angle, apply_wrist_offset
         with self._lock:
             self.joints[0] = ik_result.base
             self.joints[1] = ik_result.shoulder
             self.joints[2] = ik_result.elbow
-            level = wrist_level_angle(ik_result.shoulder, ik_result.elbow)
-            self.joints[3] = apply_wrist_offset(level, wrist_offset)
+            self.joints[3] = ik_result.wrist_vert
             self.joints[4] = wrist_rot
             self.joints[5] = gripper
 

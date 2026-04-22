@@ -123,6 +123,10 @@ from .constants import (
     HOME_POS,
     STRICT_MODE_DEFAULT,
     KEY_BINDINGS,
+    DEFAULT_THETA,
+    DEFAULT_R,
+    DEFAULT_Z,
+    DEFAULT_WRIST_OFFSET,
 )
 
 
@@ -208,6 +212,7 @@ class BraccioController:
             arm_state=self._state,
             tof_state=self._tof_state,
             safety=self._safety,
+            imu_state=self._imu_state,
         )
         # ── RL transition recorder (writes logs/rl_transitions_*.npz) ───
         # Stage 0 data collection — see Data_Collection_Guide.pdf. No
@@ -393,8 +398,17 @@ class BraccioController:
             # tell at a glance whether transitions are still accumulating
             # during a walk-away collection session.
             rec_st = self._rl_recorder.status()
+            # Surface any RLSweeper policy-prediction failure loudly.
+            # Without this, a crashed policy just returns zero-actions and
+            # the arm silently stalls on every press of Z.
+            sweeper_err = None
+            if self._rl_sweeper is not None:
+                sweeper_err = getattr(self._rl_sweeper.policy_ref,
+                                       "last_error", None)
             with self._state._lock:
-                if rec_st["tick_fatal"]:
+                if sweeper_err:
+                    self._state.last_error = f"RL POLICY ERR: {sweeper_err}"
+                elif rec_st["tick_fatal"]:
                     self._state.last_error = f"REC FATAL: {rec_st['tick_fatal']}"
                 elif rec_st["last_save_error"]:
                     self._state.last_error = f"REC SAVE ERR: {rec_st['last_save_error']}"
@@ -807,8 +821,12 @@ class BraccioController:
         state = self._state
         ik_dirty = False  # needs full IK recompute + SET ALL
         send_fn = None  # callable → sends the command after state update
+        prev_polar = None  # snapshot for IK-failure rollback
 
         with state._lock:
+            # Snapshot polar BEFORE any update so we can roll back if IK
+            # rejects the new target.
+            prev_polar = (state.theta, state.r, state.z)
             # ── IK polar axes ─────────────────────────────────────────────
             if action == "theta_inc":
                 state.theta = min(180.0, state.theta + THETA_STEP)
@@ -828,13 +846,18 @@ class BraccioController:
             elif action == "z_dec":
                 state.z = max(Z_MIN, state.z - Z_STEP)
                 ik_dirty = True
-            # ── Wrist vertical offset (still needs IK recompute) ──────────
+            # ── Wrist vertical — direct single-joint command, no IK ──────
+            # Running full IK with a new gripper_world_deg causes shoulder
+            # and elbow to re-solve, which flips branches at near-singular
+            # poses and makes the whole arm jump instead of just the wrist.
+            # wv_inc / wv_dec now rotate the wrist servo directly (mirrors
+            # how J/L work for wrist_rot and O/P for the gripper).
             elif action == "wv_inc":
-                state.wrist_offset = min(90.0, state.wrist_offset + WRIST_V_STEP)
-                ik_dirty = True
+                state.joints[3] = min(180, int(state.joints[3]) + int(WRIST_V_STEP))
+                send_fn = self._send_wrist_vert
             elif action == "wv_dec":
-                state.wrist_offset = max(-90.0, state.wrist_offset - WRIST_V_STEP)
-                ik_dirty = True
+                state.joints[3] = max(0, int(state.joints[3]) - int(WRIST_V_STEP))
+                send_fn = self._send_wrist_vert
             # ── Independent axes ──────────────────────────────────────────
             elif action == "wr_inc":
                 state.wrist_rot = min(180, state.wrist_rot + int(WRIST_R_STEP))
@@ -867,20 +890,25 @@ class BraccioController:
                 return
 
         if ik_dirty:
-            self._send_ik_move()
+            self._send_ik_move(prev_polar=prev_polar)
         elif send_fn is not None:
             send_fn()
 
     # ── Command senders ───────────────────────────────────────────────────
 
-    def _send_ik_move(self) -> None:
+    def _send_ik_move(self, prev_polar: tuple | None = None) -> None:
         """Recompute IK for the current polar state and queue the target
         through the SafetyAPI as a manual intent.
 
         The BT's ManualBranch validates the target against the full-arm
-        capsule collision checker and either emits the command or opens a
-        refusal dialog. The IK shadow is rolled back here if IK itself is
-        unreachable — otherwise the BT will either execute or refuse.
+        capsule collision checker and either emits the command or opens
+        a refusal dialog.
+
+        If IK is unreachable for the current polar state, ``prev_polar``
+        (the (θ, r, z) tuple the user had BEFORE this keypress updated
+        state) is used to roll the state back — so the user sees "no
+        motion + error message" instead of state drifting quietly to
+        unreachable coordinates on every keypress.
         """
         state = self._state
         with state._lock:
@@ -890,22 +918,38 @@ class BraccioController:
             wrist_offset = state.wrist_offset
             wrist_rot = state.wrist_rot
             gripper = state.gripper
-            cur_joints = list(state.joints)
+
+        # wrist_offset is interpreted as "desired gripper world pitch =
+        # −wrist_offset". That way a wrist_offset of 0 gives a horizontal
+        # gripper (original auto-level behaviour), and −90 gives a vertical-
+        # up gripper (matches physical HOME).
+        gripper_world_deg = -wrist_offset
 
         x, y = polar_to_cartesian(theta, r)
-        result = solve_ik(x, y, z)
+        result = solve_ik(x, y, z,
+                           gripper_world_deg=gripper_world_deg,
+                           theta_hint_deg=theta)
         if result is None:
-            with state._lock:
-                # IK impossible — roll back the polar shadow to the current
-                # arm pose so the display doesn't lie.
-                state.theta, state.r, state.z = fk_polar(cur_joints)
-                state.last_error = (
-                    f"IK unreachable: theta={theta:.0f}°  "
-                    f"r={r:.0f} mm  z={z:.0f} mm"
-                )
+            # IK impossible at the requested polar. Roll back state to
+            # the pre-keypress value so the UI display matches what the
+            # arm will actually do (nothing) and subsequent keypresses
+            # don't compound the drift into increasingly invalid regions.
+            if prev_polar is not None:
+                with state._lock:
+                    state.theta, state.r, state.z = prev_polar
+                    state.last_error = (
+                        f"IK unreachable: theta={theta:.0f}°  "
+                        f"r={r:.0f} mm  z={z:.0f} mm  (reverted)"
+                    )
+            else:
+                with state._lock:
+                    state.last_error = (
+                        f"IK unreachable: theta={theta:.0f}°  "
+                        f"r={r:.0f} mm  z={z:.0f} mm"
+                    )
             return
 
-        state.update_joints_from_ik(result, wrist_offset, wrist_rot, gripper)
+        state.update_joints_from_ik(result, wrist_rot, gripper)
         target = list(state.snapshot()["joints"])
         with state._lock:
             state.last_cmd = f"manual intent → {target}"
@@ -917,6 +961,26 @@ class BraccioController:
             wr = self._state.wrist_rot
             self._state.joints[JOINT_WRIST_ROT] = wr
             cmd = cmd_set_joint(JOINT_WRIST_ROT, wr)
+            self._state.last_cmd = cmd.strip()
+        self._bridge.send_cmd(cmd)
+
+    def _send_wrist_vert(self) -> None:
+        """Send the current wrist-vertical servo value directly.
+
+        Unlike IK-driven moves this does NOT recompute shoulder/elbow —
+        it just dispatches a single-joint SET so pressing I/K rotates
+        only the wrist. ``state.wrist_offset`` is re-derived from the
+        new joint set (gripper_world = S + E + WV − 180, from the
+        CGx-InverseK chain-closure identity) so a later A/D/W/S/Q/E
+        keypress preserves this gripper pitch through solve_ik.
+        """
+        with self._state._lock:
+            wv = int(self._state.joints[3])
+            s = float(self._state.joints[1])
+            e = float(self._state.joints[2])
+            gripper_world_deg = s + e + wv - 180.0
+            self._state.wrist_offset = -gripper_world_deg
+            cmd = cmd_set_joint(3, wv)
             self._state.last_cmd = cmd.strip()
         self._bridge.send_cmd(cmd)
 
@@ -938,14 +1002,19 @@ class BraccioController:
     def _send_home(self) -> None:
         """Route to the equilibrium pose through the safety stack.
 
-        The cascading replanner handles obstacle avoidance (direct plan →
-        via-HOME detour → midpoint perturbations → wait-and-retry →
-        bailout). On success the arm walks the returned path one step at a
-        time, driven by the BT's sequence branch.
+        Commands the equilibrium joint config directly (from HOME_POS when
+        the equilibrium polar matches DEFAULTs, else via IK for the saved
+        equilibrium). Running IK for the HOME polar used to mis-converge
+        on a gripper-horizontal pose while physical HOME has the gripper
+        vertical-up — that produced the user-visible "H tilts the gripper
+        90° forward instead of pointing up" bug.
+
+        When the saved equilibrium polar matches the default, we bypass
+        IK entirely and command HOME_POS verbatim. Otherwise IK is used
+        with the equilibrium's gripper pitch baked in via wrist_offset.
         """
         state = self._state
         with state._lock:
-            cur_joints = list(state.joints)
             eq_theta = state.equil_theta
             eq_r = state.equil_r
             eq_z = state.equil_z
@@ -953,23 +1022,47 @@ class BraccioController:
             eq_wrist_rot = state.equil_wrist_rot
             eq_gripper = state.equil_gripper
 
-        # Build the goal joint config from the equilibrium polar pose.
-        x, y = polar_to_cartesian(eq_theta, eq_r)
-        result = solve_ik(x, y, eq_z)
-        if result is None:
-            with state._lock:
-                state.last_error = (
-                    f"HOME IK unreachable: θ={eq_theta:.0f}° r={eq_r:.0f} z={eq_z:.0f}"
-                )
-            return
-        goal_q = [
-            int(result.base),
-            int(result.shoulder),
-            int(result.elbow),
-            int(max(0, min(180, result.wrist_vert + eq_wrist_offset))),
-            int(eq_wrist_rot),
-            int(eq_gripper),
-        ]
+        # Fast-path: when equilibrium polar matches the physical HOME pose
+        # (DEFAULT_THETA / DEFAULT_R / DEFAULT_Z, wrist_offset=DEFAULT), we
+        # command HOME_POS as-is. Saves an IK solve and guarantees the arm
+        # returns to the exact physical-rest pose.
+        eq_is_default = (
+            abs(eq_theta - DEFAULT_THETA) < 0.5
+            and abs(eq_r - DEFAULT_R) < 0.5
+            and abs(eq_z - DEFAULT_Z) < 0.5
+            and abs(eq_wrist_offset - DEFAULT_WRIST_OFFSET) < 0.5
+        )
+        if eq_is_default:
+            goal_q = list(HOME_POS)
+            goal_q[4] = int(eq_wrist_rot)
+            goal_q[5] = int(eq_gripper)
+        else:
+            x, y = polar_to_cartesian(eq_theta, eq_r)
+            result = solve_ik(x, y, eq_z,
+                               gripper_world_deg=-eq_wrist_offset,
+                               theta_hint_deg=eq_theta)
+            if result is None:
+                with state._lock:
+                    state.last_error = (
+                        f"HOME IK unreachable: θ={eq_theta:.0f}° r={eq_r:.0f} z={eq_z:.0f}"
+                    )
+                return
+            goal_q = [
+                int(result.base),
+                int(result.shoulder),
+                int(result.elbow),
+                int(result.wrist_vert),
+                int(eq_wrist_rot),
+                int(eq_gripper),
+            ]
+        # Reset live polar to equilibrium so UI matches the commanded pose.
+        with state._lock:
+            state.theta = eq_theta
+            state.r = eq_r
+            state.z = eq_z
+            state.wrist_offset = eq_wrist_offset
+            state.wrist_rot = eq_wrist_rot
+            state.gripper = eq_gripper
         self._safety.queue_sequence([
             Waypoint(q=goal_q, kind=WaypointType.ESSENTIAL, name="HOME",
                      gripper=int(eq_gripper)),
@@ -989,10 +1082,21 @@ class BraccioController:
         """
         state = self._state
         joints = list(state_dict["joints"])
+        # The joint list drives the arm verbatim. The polar fields in
+        # state_dict were computed by whatever FK was active when the
+        # state was saved (older versions ran a firmware-convention FK
+        # that no longer matches reality). Derive polar from joints via
+        # the current fk_polar so the UI reflects the physical pose.
+        try:
+            theta_fk, r_fk, z_fk = fk_polar(joints)
+        except Exception:
+            theta_fk = float(state_dict["theta"])
+            r_fk     = float(state_dict["r"])
+            z_fk     = float(state_dict["z"])
         with state._lock:
-            state.theta = float(state_dict["theta"])
-            state.r = float(state_dict["r"])
-            state.z = float(state_dict["z"])
+            state.theta = theta_fk
+            state.r     = r_fk
+            state.z     = z_fk
             state.wrist_offset = state_dict["wrist_offset"]
             state.wrist_rot = state_dict["wrist_rot"]
             state.gripper = state_dict["gripper"]
@@ -1048,16 +1152,12 @@ class BraccioController:
         cmd = cmd_set_all(joints)
         with self._state._lock:
             self._state.joints = list(joints)
-            # Keep polar shadow in sync with the actual command so display
-            # reads are coherent — the existing fk_polar handles this on
-            # next GET POS, but at high tick rates the display can race.
-            try:
-                theta, r, z = fk_polar(joints)
-                self._state.theta = theta
-                self._state.r = r
-                self._state.z = z
-            except Exception:
-                pass
+            # DO NOT derive polar from fk_polar(joints) here. The polar
+            # shadow IS the user's commanded intent (set when they pressed
+            # the key, solved into joints via solve_ik). Overwriting it
+            # with fk_polar on every SET ALL introduces round-trip drift
+            # on the very next keypress and corrupts the "what you asked
+            # for" source of truth. Leave state.theta/r/z alone.
             self._state.last_cmd = cmd.strip()
         self._bridge.send_cmd(cmd)
 

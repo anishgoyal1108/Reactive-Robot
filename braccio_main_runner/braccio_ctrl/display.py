@@ -173,10 +173,29 @@ class CursesDisplay:
             line = (
                 f"  theta: {state['theta']:6.1f}°   "
                 f"r: {state['r']:7.1f} mm   "
-                f"z: {state['z']:7.1f} mm"
+                f"z: {state['z']:7.1f} mm    (commanded)"
             )
             self._safe_addstr(row, 0, line[: w - 1])
             row += 1
+
+        # Physical tip position from forward kinematics on the live joint
+        # set. The IK targets (r, z) above can diverge from the actual
+        # tip because CGx's math uses a different elbow-sign convention
+        # than the physical Braccio — this second line surfaces where
+        # the gripper tip actually is so the user can see the gap.
+        try:
+            from .ik_solver import fk_tip_physical
+            _, phys_r, phys_z = fk_tip_physical(state["joints"])
+            if row < h - 1:
+                line = (
+                    f"  phys tip:        "
+                    f"r: {phys_r:7.1f} mm   "
+                    f"z: {phys_z:+7.1f} mm   (from joints via physical FK)"
+                )
+                self._safe_addstr(row, 0, line[: w - 1], curses.color_pair(_C_DIM))
+                row += 1
+        except Exception:
+            pass
 
         if row < h - 1:
             offset_str = f"{state['wrist_offset']:+.0f}"

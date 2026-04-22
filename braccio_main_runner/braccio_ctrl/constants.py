@@ -48,15 +48,27 @@ BAUD_RATE = 115200
 SERIAL_TIMEOUT = 0.1  # seconds for readline timeout
 
 # ── Default IK state ──────────────────────────────────────────────────────
-DEFAULT_THETA = 90.0  # degrees (arm pointing straight forward)
-DEFAULT_R = 152.0  # mm (~6 inches)
-DEFAULT_Z = -50.0  # mm below shoulder pivot
+# Defaults chosen to EXACTLY match the physical HOME pose so UI = reality
+# on startup. HOME_POS = [90,90,90,90,90,73] has the arm stacked vertical
+# with the gripper pointing straight up (θ_g = +90°). Under the physical-
+# convention FK, the gripper tip is at (θ=90°, r=0, z=310). The state's
+# wrist_offset default is −90 (see arm_state.py) so that the IK targets
+# a gripper-up orientation to keep the initial pose reachable.
+DEFAULT_THETA = 90.0    # degrees (arm pointing +Y direction)
+DEFAULT_R     = 0.0     # mm (tip on the vertical axis at HOME)
+DEFAULT_Z     = 310.0   # mm (L1 + L2 + L3 — fully vertical reach)
+
+# Default wrist_offset applied on top of the horizontal-gripper auto-level.
+# With DEFAULT_WRIST_OFFSET = −90 the effective gripper world angle is +90°
+# (pointing up), which matches physical HOME exactly. See ik_solver.py's
+# wrist_level_angle formula for how this composes.
+DEFAULT_WRIST_OFFSET = -90.0
 
 # ── IK reach limits ───────────────────────────────────────────────────────
-R_MIN = 10.0
-R_MAX = 240.0  # L1 + L2 - L3 = 190mm effective, but allow up to full extension
-Z_MIN = -250.0
-Z_MAX = 200.0
+R_MIN = 0.0     # tip directly above the base axis
+R_MAX = 310.0   # L1 + L2 + L3 (full horizontal extension)
+Z_MIN = -250.0  # reaching low (near the table)
+Z_MAX = 310.0   # matches HOME's full vertical extension (L1 + L2 + L3)
 
 # ── Keyboard step sizes ───────────────────────────────────────────────────
 THETA_STEP = 5.0  # deg per keypress
@@ -260,10 +272,6 @@ WORLD_KDTREE_REBUILD_S = 0.5
 # direction flip).
 SIMPLE_REPLAN_MODE = True
 # Back-compat alias — older tests and session logs reference the prior
-# name. Kept as an alias so a flip of SIMPLE_REPLAN_MODE also flips the
-# legacy reads; monkeypatching either one in tests still works because the
-# sweep branch reads SIMPLE_REPLAN_MODE via ``getattr(_c, ...)`` at runtime.
-SIMPLE_SWEEP_MODE = SIMPLE_REPLAN_MODE
 # Cool-down after a reactive reverse before the sweep allows another
 # direction flip. Prevents jitter when a sensor straddles its threshold.
 SIMPLE_SWEEP_REVERSE_COOLDOWN_S = 0.4
@@ -395,7 +403,6 @@ SWEEP_Z_CANDIDATES = SWEEP_Z_LADDER_MM   # [35, 60, 90, 10, -20] mm
 # Collision-sphere radius for pre-command obstacle clearance checks used
 # by rl_recorder._encode_obs and rl_reward proximity terms.
 SWEEP_COLLISION_RADIUS_MM = 80.0
-COLLISION_CHECK_RADIUS_MM = SWEEP_COLLISION_RADIUS_MM   # back-compat alias
 
 # Obstacle map (rolling point cloud) max age before points are discarded.
 OBS_MAP_MAX_AGE_S = 2.0
@@ -403,7 +410,6 @@ OBS_MAP_GRID_SIZE = 8    # VL53L5CX 8×8 sensing grid
 
 # Sensor channel authority — used by rl_recorder obs encoder and tof_sensor.
 SENSOR_REPLAN_CHANNELS   = [0, 1]   # CH0 (top) + CH1 (right): trigger REPLAN
-SENSOR_PRIMARY_CHANNELS  = SENSOR_REPLAN_CHANNELS   # alias
 SENSOR_ADVISORY_CHANNELS = [2]      # CH2 (left): log only, no arm reaction
 SENSOR_IGNORE_CHANNELS   = [3]      # CH3 (bottom): ignored (floor reflections)
 

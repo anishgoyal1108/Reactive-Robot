@@ -1,204 +1,347 @@
 """
-ik_solver.py — Python mirror of the Arduino solveIK() function.
+ik_solver.py — Analytical IK/FK for the Braccio, based on cgxeiji/CGx-InverseK.
 
-Coordinate system (origin = shoulder pivot M2):
-  +X  radially outward (horizontal, arm forward at theta=0)
-  +Y  90° left of +X
-  +Z  upward
+Reference implementation: https://github.com/cgxeiji/CGx-InverseK
 
-The IK solves for a 2-link planar arm (shoulder + elbow) plus a fixed
-gripper offset (L3). The wrist vertical is computed to keep the gripper
-horizontal by default; a caller-supplied offset allows manual tilt.
+This module mirrors that library's math directly in Python. The key ideas:
+ * Work in an INTERNAL arm-plane frame rotated by −π/2 from the world
+   (r, z) plane. In the internal frame, "up" is +x and "forward" is −y.
+ * At HOME the arm is stacked vertical; all four Braccio joint commands
+   equal 90°. In the internal frame every joint's "internal angle" is 0.
+ * Braccio servo convention: ``braccio_deg = (internal_rad + π/2) × 180/π``
+   so a servo value of 90° corresponds to internal 0° (extended / aligned).
+ * Shoulder equation `_shoulder = α − β` places the upper arm on the
+   elbow-down side (elbow tucked toward the arm's reach direction).
+   Falls back to elbow-up (α + β) if the primary branch lands any joint
+   outside its servo limits.
+ * Wrist equation `_wrist = φ − _shoulder − _elbow` closes the kinematic
+   chain so the end-effector points at the requested approach angle φ
+   (in world radians, with φ=π/2 meaning "gripper pointing straight up").
+
+CGx's example only uses these three joint servos; the Braccio's base is a
+planar rotation we add back on top: ``B_cmd = 180° − θ_world`` so that
+pressing the A/D keys to rotate the tip feels in the correct direction
+given the physical arm's base-servo mounting.
 """
 
-import math
-from .constants import L1, L2, L3, JOINT_LIMITS, R_MIN
+from __future__ import annotations
 
+import math
+from typing import Optional
+
+from .constants import L1, L2, L3, JOINT_LIMITS
+
+
+# ── Data class ────────────────────────────────────────────────────────────
 
 class IKResult:
-    """Joint angles (degrees, integers) returned by solve_ik()."""
+    """Joint angles (degrees, integers) returned by ``solve_ik``."""
+
+    __slots__ = ("base", "shoulder", "elbow", "wrist_vert")
+
     def __init__(self, base: int, shoulder: int, elbow: int, wrist_vert: int):
         self.base       = base
         self.shoulder   = shoulder
         self.elbow      = elbow
         self.wrist_vert = wrist_vert
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (f"IKResult(B={self.base}, S={self.shoulder}, "
                 f"E={self.elbow}, Wv={self.wrist_vert})")
 
 
-def solve_ik(x_mm: float, y_mm: float, z_mm: float):
-    """
-    Solve 2-link planar IK for Braccio.
+# ── Low-level utilities ───────────────────────────────────────────────────
 
-    Returns IKResult on success, or None if the target is unreachable.
+def _clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
+
+
+def _b2a(deg: float) -> float:
+    """Braccio degrees → internal radians. Braccio 90° = internal 0."""
+    return math.radians(deg) - math.pi / 2.0
+
+
+def _a2b(rad: float) -> float:
+    """Internal radians → Braccio degrees."""
+    return math.degrees(rad + math.pi / 2.0)
+
+
+def _in_range(rad: float, limits_deg: tuple) -> bool:
+    """Whether an internal-frame angle falls within a Braccio servo's range."""
+    lo, hi = limits_deg
+    return _b2a(lo) <= rad <= _b2a(hi)
+
+
+def polar_to_cartesian(theta_deg: float, r_mm: float) -> tuple[float, float]:
+    """Convert polar (θ, r) → Cartesian (x, y). θ = 0 → +X."""
+    t = math.radians(theta_deg)
+    return r_mm * math.cos(t), r_mm * math.sin(t)
+
+
+# ── Core planar solver (CGx _solve) ───────────────────────────────────────
+
+def _solve_planar(x_mm: float, y_mm: float, phi_rad: float
+                   ) -> Optional[tuple[float, float, float]]:
+    """2-link + wrist IK in the arm-plane.
+
+    Inputs (x, y) are the tip target in the plane, where x is the
+    horizontal reach and y is the height above the shoulder pivot.
+    ``phi_rad`` is the desired gripper approach angle in world radians
+    (π/2 = vertical-up, 0 = horizontal-forward, −π/2 = vertical-down).
+
+    Returns ``(shoulder_rad, elbow_rad, wrist_rad)`` in the internal
+    frame, or ``None`` if unreachable. The caller converts to Braccio
+    degrees with _a2b(). This is a direct translation of the CGx
+    library's ``_solve`` function (src/InverseK.cpp:81-128) except we
+    compare against Braccio JOINT_LIMITS when checking ``_in_range``.
+    """
+    # Frame rotation: the library works in a plane rotated by −π/2 from
+    # the natural (r, z) plane so "up" becomes +x in the internal frame.
+    r     = math.hypot(x_mm, y_mm)
+    theta = math.atan2(y_mm, x_mm)
+    _x = r * math.cos(theta - math.pi / 2.0)
+    _y = r * math.sin(theta - math.pi / 2.0)
+    _phi = phi_rad - math.pi / 2.0
+
+    # Wrist pivot: pull back from the tip along the requested approach.
+    xw = _x - L3 * math.cos(_phi)
+    yw = _y - L3 * math.sin(_phi)
+
+    alpha = math.atan2(yw, xw)
+    R     = math.hypot(xw, yw)
+    if R < 1e-6 or R > (L1 + L2) or R < abs(L1 - L2):
+        return None
+
+    # Law of cosines — triangle (shoulder, elbow, wrist).
+    cos_beta  = (R * R + L1 * L1 - L2 * L2) / (2.0 * R * L1)
+    cos_gamma = (L1 * L1 + L2 * L2 - R * R) / (2.0 * L1 * L2)
+    cos_beta  = _clamp(cos_beta,  -1.0, 1.0)
+    cos_gamma = _clamp(cos_gamma, -1.0, 1.0)
+    beta  = math.acos(cos_beta)
+    gamma = math.acos(cos_gamma)
+
+    # Primary (elbow-down) branch.
+    shoulder = alpha - beta
+    elbow    = math.pi - gamma
+    wrist    = _phi - shoulder - elbow
+
+    if (_in_range(shoulder, JOINT_LIMITS[1])
+            and _in_range(elbow, JOINT_LIMITS[2])
+            and _in_range(wrist, JOINT_LIMITS[3])):
+        return shoulder, elbow, wrist
+
+    # Elbow-up fallback (flip the bend and recompute the wrist).
+    shoulder = alpha + beta
+    elbow    = -(math.pi - gamma)
+    wrist    = _phi - shoulder - elbow
+    if (_in_range(shoulder, JOINT_LIMITS[1])
+            and _in_range(elbow, JOINT_LIMITS[2])
+            and _in_range(wrist, JOINT_LIMITS[3])):
+        return shoulder, elbow, wrist
+
+    return None
+
+
+def _solve_planar_free_phi(x_mm: float, y_mm: float, phi_initial: float
+                            ) -> Optional[tuple[float, float, float, float]]:
+    """Find the nearest reachable approach angle to ``phi_initial``.
+
+    Tries ``phi_initial`` first, then sweeps outward in ±1° steps until a
+    reachable φ is found or the full ±180° range has been exhausted.
+    Returns ``(shoulder, elbow, wrist, phi_used)`` in radians or ``None``.
+
+    The sweep STARTS at the caller's desired φ so a user's explicit
+    gripper pitch (via wrist_offset) is respected whenever possible. If
+    the exact φ is unreachable the fallback lands on the closest
+    reachable alternative — matching what CGx's free-phi overload
+    effectively does, but anchored to the caller's intent instead of
+    always defaulting to vertical.
+    """
+    # Try the user's preferred phi first.
+    result = _solve_planar(x_mm, y_mm, phi_initial)
+    if result is not None:
+        s, e, w = result
+        return s, e, w, phi_initial
+    # Sweep outward in ±1° increments.
+    step = math.radians(1.0)
+    for i in range(1, 181):
+        for sign in (1, -1):
+            phi = phi_initial + sign * i * step
+            result = _solve_planar(x_mm, y_mm, phi)
+            if result is not None:
+                s, e, w = result
+                return s, e, w, phi
+    return None
+
+
+# ── Forward kinematics ────────────────────────────────────────────────────
+
+def fk_tip_physical(joints) -> tuple[float, float, float]:
+    """Physical forward kinematics — where the tip ACTUALLY lands.
+
+    The CGx-based ``fk_polar`` uses the library's internal sign
+    convention for elbow and wrist. The physical Braccio on this arm
+    (per the probe_joint_conventions.py findings) bends the opposite
+    way: E > 90 tips the forearm FORWARD (toward +r), not backward.
+    So the joints the IK outputs, when executed by the physical servo,
+    land the tip at a different location than CGx's FK predicts.
+
+    This function uses the physical convention:
+        θ_upper_world = S
+        θ_fa_world    = S + 90 − E
+        θ_g_world     = S + 180 − E − WV
+
+    Returns (theta_deg, r_mm, z_mm) of the actual physical tip in the
+    shoulder-pivot frame. Use this for state tracking, RL observation
+    vectors, and any display that needs to match what the user sees
+    physically. Use ``fk_polar`` only when you need the inverse of
+    ``solve_ik`` for CGx's internal math.
+    """
+    if len(joints) < 4:
+        raise ValueError("joints must contain at least [B, S, E, WV]")
+    B  = float(joints[0])
+    S  = float(joints[1])
+    E  = float(joints[2])
+    WV = float(joints[3])
+
+    th_upper = math.radians(S)
+    th_fa    = math.radians(S + 90.0  - E)
+    th_g     = math.radians(S + 180.0 - E - WV)
+
+    r_tip = (L1 * math.cos(th_upper)
+             + L2 * math.cos(th_fa)
+             + L3 * math.cos(th_g))
+    z_tip = (L1 * math.sin(th_upper)
+             + L2 * math.sin(th_fa)
+             + L3 * math.sin(th_g))
+    theta = 180.0 - B
+    return theta, r_tip, z_tip
+
+
+def fk_polar(joints) -> tuple[float, float, float]:
+    """Servo angles → tip polar (θ, r, z).
+
+    Inverse of ``solve_ik`` in the same conventions. Uses the internal
+    frame forward kinematics: the upper arm, forearm, and hand each
+    rotate the arm plane by their internal angle.
+    """
+    if len(joints) < 4:
+        raise ValueError("joints must contain at least [B, S, E, WV]")
+    B  = float(joints[0])
+    S  = float(joints[1])
+    E  = float(joints[2])
+    WV = float(joints[3])
+
+    # Internal-frame joint angles.
+    s_int = _b2a(S)
+    e_int = _b2a(E)
+    w_int = _b2a(WV)
+
+    # Forward kinematics in the internal frame (x = up, y = −forward).
+    # Each link contributes a vector rotated by the cumulative angle.
+    s_world = s_int
+    f_world = s_int + e_int           # forearm world angle (internal)
+    g_world = s_int + e_int + w_int   # gripper world angle (internal)
+
+    _x = (L1 * math.cos(s_world)
+          + L2 * math.cos(f_world)
+          + L3 * math.cos(g_world))
+    _y = (L1 * math.sin(s_world)
+          + L2 * math.sin(f_world)
+          + L3 * math.sin(g_world))
+
+    # Un-rotate the internal frame back to world. In _solve_planar we
+    # did (_x, _y) = (r·cos(θ−π/2), r·sin(θ−π/2)) with input (r_tip,
+    # z_tip). That simplifies to (_x, _y) = (z_tip, −r_tip), so the
+    # inverse is (r_tip, z_tip) = (−_y, _x).
+    r_tip = -_y
+    z_tip = _x
+
+    theta = 180.0 - B
+    return theta, r_tip, z_tip
+
+
+# ── Public IK entry point ────────────────────────────────────────────────
+
+def solve_ik(x_mm: float, y_mm: float, z_mm: float,
+             gripper_world_deg: float = 0.0,
+             theta_hint_deg: Optional[float] = None) -> Optional[IKResult]:
+    """Braccio IK entry point.
 
     Parameters
     ----------
-    x_mm, y_mm : horizontal Cartesian coordinates (mm) from shoulder pivot
-    z_mm       : vertical height (mm) relative to shoulder pivot
-                 (negative = below the pivot, e.g. table surface)
+    x_mm, y_mm, z_mm
+        Tip target in the shoulder-pivot frame.
+    gripper_world_deg
+        Desired gripper world angle in the (r, z) plane. 0 = horizontal
+        forward, +90 = vertical up, −90 = vertical down.
+    theta_hint_deg
+        Used for the base command when the tip is on the base axis
+        (r ≲ 1 mm). Without this hint the base snaps to 180° at the
+        singular radius.
     """
-    # Base rotation — atan2 in the horizontal plane
-    base_deg = math.degrees(math.atan2(y_mm, x_mm))
-    lo, hi = JOINT_LIMITS[0]
-    base_deg = max(lo, min(hi, base_deg))
+    r_tip = math.hypot(x_mm, y_mm)
 
-    # Subtract gripper length so IK targets the wrist pivot, not the gripper tip
-    r = math.sqrt(x_mm ** 2 + y_mm ** 2) - L3
-    h = z_mm
-    if r < 0.0:
-        r = 0.0   # clamp: target closer than gripper length
+    # Base rotation — invert the servo flip so pressing A/D rotates the
+    # tip intuitively. At r ≈ 0 atan2 is meaningless; use the hint.
+    if r_tip < 1.0 and theta_hint_deg is not None:
+        theta_world = theta_hint_deg
+    else:
+        theta_world = math.degrees(math.atan2(y_mm, x_mm))
+    b_lo, b_hi = JOINT_LIMITS[0]
+    base_cmd = _clamp(180.0 - theta_world, b_lo, b_hi)
 
-    dist2 = r * r + h * h
-    dist  = math.sqrt(dist2)
+    # In-plane target: use the radial reach (not x) as the forward axis
+    # and z as the vertical axis, since CGx's _solve assumes a planar arm.
+    phi_rad = math.radians(gripper_world_deg)
 
-    if dist < 1e-3:
-        return None          # target at origin
-    if dist > (L1 + L2):
-        return None          # too far (fully extended arm can't reach)
-    if dist < abs(L1 - L2):
-        return None          # too close (inside the inner unreachable zone)
-
-    # Elbow angle via law of cosines
-    cos_elbow = (dist2 - L1 ** 2 - L2 ** 2) / (2.0 * L1 * L2)
-    cos_elbow = max(-1.0, min(1.0, cos_elbow))
-    elbow_deg = 180.0 - math.degrees(math.acos(cos_elbow))
-
-    # Shoulder angle
-    alpha    = math.atan2(h, r)
-    cos_beta = (dist2 + L1 ** 2 - L2 ** 2) / (2.0 * dist * L1)
-    cos_beta = max(-1.0, min(1.0, cos_beta))
-    shoulder_deg = math.degrees(alpha + math.acos(cos_beta))
-    s_lo, s_hi = JOINT_LIMITS[1]
-    shoulder_deg = max(s_lo, min(s_hi, shoulder_deg))
-
-    # Wrist vertical: keeps gripper horizontal (auto-level formula)
-    wrist_vert_deg = wrist_level_angle(shoulder_deg, elbow_deg)
+    # Try the requested approach angle first; if that specific pose is
+    # unreachable, find the nearest reachable phi to honour the caller's
+    # intent as closely as possible.
+    free = _solve_planar_free_phi(r_tip, z_mm, phi_rad)
+    if free is None:
+        return None
+    s_rad, e_rad, w_rad, _phi_used = free
 
     return IKResult(
-        base       = int(round(base_deg)),
-        shoulder   = int(round(shoulder_deg)),
-        elbow      = int(round(elbow_deg)),
-        wrist_vert = int(round(wrist_vert_deg)),
+        base       = int(round(base_cmd)),
+        shoulder   = int(round(_a2b(s_rad))),
+        elbow      = int(round(_a2b(e_rad))),
+        wrist_vert = int(round(_a2b(w_rad))),
     )
 
 
-def polar_to_cartesian(theta_deg: float, r_mm: float):
-    """
-    Convert polar (theta, r) → Cartesian (x, y).
-
-    theta_deg maps directly to the base servo angle convention used in the
-    Arduino sketch: theta=90 → arm pointing straight forward.
-
-    Returns (x_mm, y_mm).
-    """
-    theta_rad = math.radians(theta_deg)
-    x = r_mm * math.cos(theta_rad)
-    y = r_mm * math.sin(theta_rad)
-    return x, y
-
+# ── Auto-level + offset helpers ───────────────────────────────────────────
 
 def wrist_level_angle(shoulder_deg: float, elbow_deg: float) -> float:
-    """
-    Compute the wrist vertical angle that keeps the gripper level in the
-    overhand orientation (gripper tip forward-and-up as
-    ``wrist_vert → 180°``).
+    """Return WV that aims the gripper horizontally (φ = 0).
 
-    Formula: WristV = Shoulder + Elbow - 180
-
-    Convention flip from the original "180 - Shoulder - Elbow": on the
-    physical Braccio the wrist-vertical servo mounts so that increasing
-    ``wrist_vert`` rotates the gripper upward. The old convention drove
-    the wrist toward 0 as shoulder+elbow grew, which produced the
-    "backwards / under-hand" look the user reported. The flipped form
-    saturates wrist at 180 (overhand) when shoulder and elbow are bent
-    together — matches the intuition "bending the arm in → gripper
-    rotates forward-and-up".
+    Derived from the CGx chain-closure `wrist = φ − shoulder − elbow` in
+    the internal frame. For φ = 0: wrist_internal = −s_int − e_int, so
+    wrist_braccio = 90° − (S − 90°) − (E − 90°) = 270 − S − E. Clamped
+    to the physical WV servo range.
     """
-    angle = shoulder_deg + elbow_deg - 180.0
+    wv = 270.0 - shoulder_deg - elbow_deg
     w_lo, w_hi = JOINT_LIMITS[3]
-    return max(w_lo, min(w_hi, angle))
+    return _clamp(wv, w_lo, w_hi)
 
 
 def apply_wrist_offset(base_wrist_deg: float, offset_deg: float) -> int:
-    """
-    Add a manual tilt offset to the auto-level wrist angle and clamp to limits.
-    """
+    """Add a manual tilt offset on top of an auto-level wrist."""
     w_lo, w_hi = JOINT_LIMITS[3]
-    return int(round(max(w_lo, min(w_hi, base_wrist_deg + offset_deg))))
+    return int(round(_clamp(base_wrist_deg + offset_deg, w_lo, w_hi)))
 
 
-def fk_polar(joints: list) -> tuple:
-    """
-    Forward kinematics: joint servo angles → IK polar state (theta, r, z).
-
-    This is the exact inverse of solve_ik() / polar_to_cartesian().
-    Used to sync the software IK state from the arm's actual joint positions
-    so the first commanded move after startup is a delta from where the arm
-    really is, not from a stale software default.
-
-    Parameters
-    ----------
-    joints : 6-element list [Base, Shoulder, Elbow, WristV, WristR, Gripper]
-             (degrees, as reported by the Arduino)
-
-    Returns
-    -------
-    (theta_deg, r_mm, z_mm) — the polar coordinates that solve_ik() would
-    have needed to produce these Base/Shoulder/Elbow angles.
-    """
-    base_deg     = float(joints[0])
-    shoulder_deg = float(joints[1])
-    elbow_deg    = float(joints[2])
-
-    theta = base_deg
-
-    # Distance from shoulder pivot to wrist pivot (law of cosines).
-    # The interior elbow angle in the kinematic triangle equals elbow_deg.
-    E_rad = math.radians(elbow_deg)
-    dist2 = L1 ** 2 + L2 ** 2 - 2.0 * L1 * L2 * math.cos(E_rad)
-    dist  = math.sqrt(max(0.0, dist2))
-
-    if dist < 1e-3:
-        # Fully folded arm — return a safe near-origin value
-        return theta, L3 + 1.0, 0.0
-
-    # Beta: angle at the shoulder vertex of the kinematic triangle.
-    # Matches the cos_beta used in solve_ik().
-    cos_beta = (dist2 + L1 ** 2 - L2 ** 2) / (2.0 * dist * L1)
-    cos_beta = max(-1.0, min(1.0, cos_beta))
-    beta_deg = math.degrees(math.acos(cos_beta))
-
-    # Alpha: elevation angle of the wrist-pivot target from horizontal.
-    # In solve_ik(): shoulder = alpha + beta  →  alpha = shoulder - beta
-    alpha_deg = shoulder_deg - beta_deg
-    alpha_rad = math.radians(alpha_deg)
-
-    # Horizontal and vertical components of the shoulder→wrist vector
-    r_eff = dist * math.cos(alpha_rad)   # effective reach (to wrist pivot)
-    z     = dist * math.sin(alpha_rad)   # height (signed: negative = below pivot)
-
-    # Add gripper length back to get the tip reach
-    r = r_eff + L3
-
-    r = max(R_MIN, r)   # keep within IK reach envelope
-    return theta, r, z
-
+# ── Reachability hint (cheap polar-space check) ───────────────────────────
 
 def reachability(theta_deg: float, r_mm: float, z_mm: float) -> str:
-    """
-    Check whether a polar target is reachable without moving the arm.
-
-    Returns 'ok', 'too_far', 'too_close', or 'at_origin'.
-    Useful for clamping UI feedback before sending a command.
-    """
+    """Coarse workspace membership check. Returns 'ok', 'too_far',
+    'too_close', or 'at_origin'. Does NOT run the full planar solve."""
     x, y = polar_to_cartesian(theta_deg, r_mm)
-    r = math.sqrt(x ** 2 + y ** 2) - L3
-    if r < 0.0:
-        r = 0.0
-    dist = math.sqrt(r * r + z_mm * z_mm)
+    r_tip = math.hypot(x, y)
+    r_w = r_tip - L3
+    z_w = z_mm
+    dist = math.hypot(r_w, z_w)
     if dist < 1e-3:
         return 'at_origin'
     if dist > (L1 + L2):

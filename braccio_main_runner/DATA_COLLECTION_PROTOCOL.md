@@ -6,6 +6,37 @@ The RL recorder logs automatically — just have the controller running.
 
 ---
 
+## Pipeline this NPZ feeds into (Q2: SAC-from-sim)
+
+```
+NPZ files (this protocol)
+   │
+   ▼
+calibrate_noise.py   — fits ToF sigma + servo lag + cell dropout rate
+   │
+   ▼
+sim/noise_params.json
+   │
+   ▼
+train_rl.py          — SAC-from-random-init in PyBullet, ~1M steps
+   │
+   ▼
+best_policy/best_model.zip
+   │
+   ▼
+python -m braccio_ctrl … --rl-policy best_policy/best_model.zip
+   │
+   ▼
+(optional) rl_online_trainer.py  — live fine-tune with hot-swap
+```
+
+**No behavioral cloning step.** The safety BT does not expose its internal
+target waypoint to `rl_recorder.set_goal()`, so the goal-delta labels in
+collected NPZ are all zero — actively harmful as warm-start labels. The
+sim policy starts from random and learns purely from `rl_reward.py`.
+
+---
+
 ## What NPZ data is used for
 
 | Data | Used for | NOT used for |
@@ -15,15 +46,62 @@ The RL recorder logs automatically — just have the controller running.
 | `rewards` arrays | Ignored (placeholder zeros) | Any training |
 | Annotated NPZ (path annotator output) | Optional supervised fine-tune signal | Main training loop |
 
-**Behavioral cloning is skipped entirely.**  The state machine's actions are
-not trustworthy training labels — it makes false-positive replans, discrete
-jumps, and hard-coded decisions that would encode spurious correlations in the
-network.  Training is SAC-from-scratch in simulation using `rl_reward.py` as
-the ground-truth reward signal.
-
 The obs arrays are real sensor data and are used only to calibrate simulation
 noise parameters (ToF sigma, servo lag, cell dropout rate) so the sim matches
 the real hardware distribution.
+
+---
+
+## Why hardware testing is part of the pipeline at all
+
+Two distinct hardware phases:
+
+1. **Stage 0 (this protocol — TONIGHT)**: Capture real ToF noise / servo lag
+   / cell dropout statistics so the sim distributions match hardware. Without
+   this, the sim policy learns against an idealised noise model and degrades
+   on transfer.
+
+2. **Stage 4 (after deployment, OPTIONAL)**: Run `rl_online_trainer.py`
+   alongside the deployed policy. Real transitions accumulate in
+   `SharedReplayBuffer`; SAC gradient steps refine the policy at a
+   conservative learning rate; weights hot-swap into the live RLSweeper
+   without pausing the arm. Skip Stage 4 if Stage 3 deployment behaves well.
+
+---
+
+## About the safety BT during data collection
+
+**Let it replan. Do not try to suppress it.** When you hold a hand or
+cylinder near the ToF sensors, the safety BT will trigger polar-skip,
+Z-ladder, BiRRT, or direction-flip recovery. Every one of those maneuvers
+is recorded by RLRecorder and feeds straight into noise calibration:
+- Replan transitions stress-test the servo lag estimator (commanded vs.
+  actual joint deltas under abrupt motion changes).
+- Partial occlusion during avoidance maneuvers exposes ToF cell dropout
+  patterns the noise model needs.
+- The full obstacle distance distribution from "far" to "near-collision"
+  is captured naturally as the BT reacts.
+
+If you suppressed BT replanning to get "clean" motion data, you would
+get a less accurate noise model. The recorder is observational — it does
+not care what made the arm move.
+
+---
+
+## About the IR sensor
+
+IR severity (`ir_bits`) appears in **obs[53]** as a passive informational
+feature. The trained RL policy will see it, weight it as it sees fit, and
+use it as one of many obstacle signals.
+
+**Not used for episode termination during data collection.** The recorder
+never inserts artificial done=True boundaries on IR DANGER. Doing so would
+corrupt the Bellman targets during downstream training. Physical safety is
+already provided by the safety BT's emergency-stop pathway and the IR
+hardware itself; the recorder just observes.
+
+If your IR wiring is loose or producing false positives, launch with
+`--no-ir` to keep ir_bits forced to zero (ToF stays active).
 
 ---
 
@@ -152,6 +230,9 @@ These transitions give the noise model its close-range sigma estimate.
 ## After collection
 
 1. Press `ESC` to quit — this flushes NPZ buffers to `logs/`.
+   The controller prints `✓ RL transitions saved: N → logs/rl_transitions_*.npz`.
+   If you instead see `WARNING: rl_recorder stopped with 0 transitions buffered`
+   or `REC FATAL: …`, check `logs/controller.log` before re-running.
 2. Verify: `ls -lh logs/rl_transitions_*.npz` (expect ≥3 files, ≥20 MB total).
 3. Run noise calibration:
    ```
@@ -177,12 +258,38 @@ These transitions give the noise model its close-range sigma estimate.
    SAC trains from random initialisation in PyBullet using `rl_reward.py` as
    ground truth.  No behavioral cloning step.
 
+6. Deploy on hardware:
+   ```
+   python -m braccio_ctrl /dev/ttyACM0 --teensy-port /dev/ttyACM1 \
+       --rl-policy best_policy/best_model.zip
+   ```
+   The Z key now starts/stops the RLSweeper instead of the safety BT sweep.
+   `--rl-policy` is the only switch — everything else (sequence editor,
+   manual keys, IMU calibration, ToF logging) behaves identically.
+
 ---
 
 ## Logging reminder
 
 - `G` key → start/stop **ToF CSV** log (`logs/tof_TIMESTAMP.csv`)
 - RL transitions log automatically at SWEEP_TICK_HZ — no key needed.
+- The recorder's status (running / buffered samples / last save / fatal)
+  is shown live in the controller's status line via `last_resp` /
+  `last_error` fields, so you can confirm during a long walk-away session
+  that transitions are still accumulating.
 - NPZ `actions` arrays are logged but **not used for training**.
   They exist solely so `calibrate_noise.py` can estimate servo lag from
   commanded vs. actual position changes.
+
+---
+
+## Sanity check before walking away
+
+Before each scenario, glance at the controller status line:
+- `rec N samp` should be incrementing — if it sticks at 0, something is
+  wrong (check `logs/controller.log` for `RLRecorder tick error`).
+- `REC FATAL: …` — recorder gave up after 10 consecutive errors. Stop
+  and investigate before continuing; otherwise the rest of the session
+  produces no NPZ.
+- ToF panel should show non-NaN cells in CH0/CH1 within ~1 second of
+  enabling sweep. If the grid is solid grey, the Teensy isn't streaming.

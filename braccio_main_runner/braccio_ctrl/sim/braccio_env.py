@@ -422,15 +422,60 @@ class BraccioSimEnv(BraccioBaseEnv):
         else:
             self._goal_theta, self._goal_r, self._goal_z = self._sample_reachable()
 
-        # Obstacle — ensure it's not on top of start or goal
-        for _ in range(20):
-            self._obs_theta  = _u("obstacle_theta_deg", [20.0, 160.0])
-            self._obs_r_mm   = _u("obstacle_r_mm",      [80.0, 200.0])
-            self._obs_z_mm   = _u("obstacle_z_mm",     [-100.0, 100.0])
-            obs_c = self._obs_center_mm()
-            if (float(np.linalg.norm(self._tip_pos_mm() - obs_c))
-                    > self._obs_radius + ARM_TIP_RADIUS_MM + 50.0):
-                break
+        # Fix G: obstacle placement. 40% of episodes force the obstacle
+        # directly onto the sweep arc between start and goal so the policy
+        # MUST learn to maneuver around it (rather than "stop early and
+        # avoid the rare off-path obstacle" as the prior single-sphere-at-
+        # random placement allowed). Remaining 60% sample uniformly over
+        # the workspace (including some episodes where the obstacle is
+        # trivially avoidable — policy still needs to recognise safe
+        # sweeps).
+        on_path = self._rng.random() < 0.40
+        if on_path:
+            # Place obstacle on the direct line between current and goal θ,
+            # at the goal's r/z with small jitter. Radius is clamped up so
+            # the obstacle actually intrudes into the sweep path.
+            t_lo, t_hi = sorted((self._theta, self._goal_theta))
+            # Avoid putting it exactly on start (≥15° margin) or goal
+            # (≥10° margin) so the arm has room to approach.
+            t_lo += 15.0
+            t_hi -= 10.0
+            if t_hi > t_lo:
+                self._obs_theta = float(self._rng.uniform(t_lo, t_hi))
+                self._obs_r_mm  = float(np.clip(
+                    self._goal_r + self._rng.normal(0.0, 20.0),
+                    80.0, 230.0,
+                ))
+                self._obs_z_mm  = float(np.clip(
+                    self._goal_z + self._rng.normal(0.0, 15.0),
+                    -100.0, 100.0,
+                ))
+                # Ensure obstacle is large enough to actually block the path.
+                self._obs_radius = float(np.clip(
+                    self._obs_radius, 70.0, 120.0,
+                ))
+            else:
+                on_path = False   # degenerate geometry; fall through
+
+        if not on_path:
+            # Uniform random (original behaviour). Ensure it's not on top
+            # of start or goal.
+            for _ in range(20):
+                self._obs_theta  = _u("obstacle_theta_deg", [20.0, 160.0])
+                self._obs_r_mm   = _u("obstacle_r_mm",      [80.0, 200.0])
+                self._obs_z_mm   = _u("obstacle_z_mm",     [-100.0, 100.0])
+                obs_c = self._obs_center_mm()
+                if (float(np.linalg.norm(self._tip_pos_mm() - obs_c))
+                        > self._obs_radius + ARM_TIP_RADIUS_MM + 50.0):
+                    break
+
+        # Fix H: sweep-cycle tracking. Count zero-crossings of
+        # (theta - 90) to detect full sweep cycles; used in _apply_action
+        # to deliver a +5 bonus each time the arm completes a 0↔180
+        # round trip without collision.
+        self._sweep_last_side  = int(np.sign(self._theta - 90.0) or 1)
+        self._sweep_half_count = 0
+        self._episode_on_path  = on_path   # diagnostic, available in info
 
         self._recreate_obstacle()
         self._set_arm_joints(self._theta, self._r, self._z)
@@ -538,11 +583,25 @@ class BraccioSimEnv(BraccioBaseEnv):
         else:
             obs_response = "clear"
 
+        # Fix H: sweep-cycle completion bonus. Detect a full half-sweep
+        # (θ crossed θ=90 from one side to the other). Two half-sweeps =
+        # one full cycle. Info is propagated to the reward function via
+        # BraccioSimEnv.step() which adds a cycle bonus.
+        cur_side = int(np.sign(self._theta - 90.0) or self._sweep_last_side)
+        half_sweep_completed = False
+        if cur_side != self._sweep_last_side and ir_bits == 0:
+            self._sweep_half_count += 1
+            half_sweep_completed = True
+            self._sweep_last_side = cur_side
+
         return {
-            "obstacle_response": obs_response,
-            "ir_bits":           ir_bits,
-            "ch0_min_mm":        ch0_min,
-            "ch1_min_mm":        ch1_min,
+            "obstacle_response":     obs_response,
+            "ir_bits":               ir_bits,
+            "ch0_min_mm":            ch0_min,
+            "ch1_min_mm":            ch1_min,
+            "half_sweep_completed":  half_sweep_completed,
+            "sweep_half_count":      self._sweep_half_count,
+            "on_path_obstacle":      bool(getattr(self, '_episode_on_path', False)),
         }
 
     def render(self) -> None:

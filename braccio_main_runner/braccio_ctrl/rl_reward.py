@@ -93,6 +93,30 @@ JERK_GAIN_THETA      = 0.02    # |Δaction[0]|  theta
 JERK_GAIN_R          = 0.01    # |Δaction[1]|  r
 JERK_GAIN_Z          = 0.01    # |Δaction[2]|  z
 
+# Fix F: Replan-progress bonus. Rewards moving SIDEWAYS (theta axis)
+# when an obstacle is close. Without this term the speed + proximity
+# penalties converge to "stop" as Pareto-optimal — moving earns a
+# penalty, stopping earns nothing. This bonus makes continuing to sweep
+# around the obstacle strictly better than freezing. Coefficient was
+# sized to beat the combined proximity + speed-limit penalty at
+# typical obstacle distances (~50 mm), verified by the test harness
+# at the bottom of this module: maneuver reward should be > freeze
+# reward when the obstacle is close.
+REPLAN_PROGRESS_COEFF    = 1.50
+REPLAN_OBSTACLE_THRESH_N = 0.40   # obs cell < 0.40 (= 100 mm for CH0/CH1) → "close"
+# Additional bonus when the action SUCCESSFULLY reduces obstacle
+# proximity (i.e., obstacle was close in obs and is further in
+# next_obs). Gives extra credit for effective avoidance maneuvers.
+REPLAN_RECOVERY_BONUS    = 0.50
+
+# Fix H: Sweep-cycle completion bonus. Delivered by the sim env each
+# time the arm crosses θ=90 from one side to the other without
+# colliding. Gives SAC a dense terminal signal for the actual task
+# (continuous obstacle-aware sweeping) rather than only "reach this
+# random goal once." The info dict from BraccioSimEnv._apply_action
+# surfaces 'half_sweep_completed' per step when a crossing just fired.
+HALF_SWEEP_BONUS     = 2.50   # per half-sweep (two halves = full 0↔180 cycle)
+
 
 # ── Helpers: un-normalise obs fields ────────────────────────────────────────
 
@@ -222,6 +246,38 @@ def compute_reward(obs:          np.ndarray,
         r -= JERK_GAIN_THETA * abs(a0 - p0)
         r -= JERK_GAIN_R     * abs(a1 - p1)
         r -= JERK_GAIN_Z     * abs(a2 - p2)
+
+    # ── 8. Replan-progress bonus (Fix F) ─────────────────────────────────
+    # When an obstacle is close to either primary ToF channel in the
+    # CURRENT or PREVIOUS observation, reward continuing to move along
+    # the sweep axis (theta). This counter-balances the speed +
+    # proximity penalties that otherwise make "stop" the Pareto-optimal
+    # action near an obstacle. Direction of motion doesn't matter —
+    # either way around the obstacle is fine.
+    min_thresh_mm = REPLAN_OBSTACLE_THRESH_N * CH0_CH1_NORM_MM
+    prev_ch0_mm = extract_min_mm(obs,      OBS_CH0_GRID_SLICE, CH0_CH1_NORM_MM)
+    prev_ch1_mm = extract_min_mm(obs,      OBS_CH1_GRID_SLICE, CH0_CH1_NORM_MM)
+    next_ch0_mm = extract_min_mm(next_obs, OBS_CH0_GRID_SLICE, CH0_CH1_NORM_MM)
+    next_ch1_mm = extract_min_mm(next_obs, OBS_CH1_GRID_SLICE, CH0_CH1_NORM_MM)
+    was_close  = (prev_ch0_mm < min_thresh_mm) or (prev_ch1_mm < min_thresh_mm)
+    now_close  = (next_ch0_mm < min_thresh_mm) or (next_ch1_mm < min_thresh_mm)
+    if was_close or now_close:
+        # Dead-zone for noise. Only rewards actual motion, not jitter.
+        replan_drive = max(0.0, abs(a0) - 0.05)
+        r += REPLAN_PROGRESS_COEFF * replan_drive
+        # Bonus for ACTIVELY moving away: obstacle was close, now it
+        # isn't. Strict upgrade over "still detecting close obstacle."
+        if was_close and not now_close:
+            r += REPLAN_RECOVERY_BONUS
+
+    # ── 9. Sweep-cycle bonus (Fix H) ─────────────────────────────────────
+    # The sim env sets info['half_sweep_completed']=True on the step
+    # where θ crosses 90° from one side to the other (without collision).
+    # Each crossing earns HALF_SWEEP_BONUS; two crossings = full cycle,
+    # matching the project's top-line objective ("continuous 0↔180
+    # obstacle-aware sweep").
+    if info.get('half_sweep_completed', False):
+        r += HALF_SWEEP_BONUS
 
     return float(r)
 

@@ -46,6 +46,34 @@ from .constants import (
     IR_MIN, IR_MONITOR_HZ,
 )
 
+# Hybrid sweep mode: theta is driven by a classical oscillator (guaranteed
+# 0↔180 motion) and the policy only contributes (Δr, Δz) corrections on
+# top. This trades off "pure RL" for "demonstrable obstacle avoidance on
+# top of a sweep that always moves."  Rationale: two retrains produced
+# policies that learned to freeze instead of sweep, so driving θ
+# classically is the only way to get guaranteed motion for the demo.
+# Set HYBRID_THETA_DRIVE=False to fall back to full policy control.
+HYBRID_THETA_DRIVE       = True
+HYBRID_SWEEP_DEG_PER_TICK = 2.0     # at 20 Hz → 40°/s sweep rate
+HYBRID_SWEEP_THETA_LO     = 0.0
+HYBRID_SWEEP_THETA_HI     = 180.0
+# Policy still gets some theta influence during obstacle avoidance so it
+# can reverse direction or pause briefly. Clipped to ±3°/tick.
+HYBRID_POLICY_THETA_CLIP  = 3.0
+# In hybrid mode, also clip r/z corrections so the policy can't pull
+# the tip dramatically down or in — just enough headroom for obstacle
+# avoidance. These are per-tick deltas (mm).
+HYBRID_POLICY_R_CLIP      = 15.0     # ±15 mm r per tick → ~300 mm/s max
+HYBRID_POLICY_Z_CLIP      = 15.0     # ±15 mm z per tick
+# In hybrid mode the arm starts at (r, z) = HOME polar and the policy's
+# deltas accumulate. To prevent runaway drift, we also clip the absolute
+# (r, z) setpoint to a safe window that keeps the arm above the table
+# and within the sweep arc. Matches the saved sweep_* waypoints.
+HYBRID_SWEEP_R_NOMINAL    = 152.0
+HYBRID_SWEEP_Z_NOMINAL    = 60.0
+HYBRID_SWEEP_R_RANGE      = (80.0, 220.0)
+HYBRID_SWEEP_Z_RANGE      = (-20.0, 120.0)
+
 # Stall detector: after this many consecutive ticks where ``_send_move``
 # rejected the policy's target (unreachable or zero-motion), the sweeper
 # escalates to a safety-BT fallback plan so something moves. 40 ticks at
@@ -194,6 +222,12 @@ class RLSweeper:
         self._quiet_ticks_left:  int  = 0       # skip _send_move while > 0
         self._last_fallback_tick: int = -10_000 # last tick the fallback fired
 
+        # Hybrid sweep: the classical θ oscillator state. +1 = sweeping
+        # toward 180°, -1 = sweeping toward 0°. Advances each tick by
+        # HYBRID_SWEEP_DEG_PER_TICK, reverses at endpoints.
+        self._hybrid_theta: float = 90.0          # current setpoint
+        self._hybrid_dir:   int   = +1            # +1 / -1
+
         self.tick_hz = float(tick_hz)
 
         # Goal state (mode-agnostic).  None ⇒ fall back to sweep-mode endpoints.
@@ -222,6 +256,36 @@ class RLSweeper:
         self._stop.clear()
         self._ir_estop.clear()
         self._prev_obs = None
+
+        # Hybrid-sweep init: seed the oscillator at the arm's current θ so
+        # the first command is a continuation of the current pose rather
+        # than a big jump to wherever the oscillator happened to be.
+        # Reset stall tracking too. Also snap the arm's (r, z) to the
+        # sweep nominal so the policy doesn't start from a curled-down
+        # pose and accumulate deltas from there.
+        self._stall_count  = 0
+        self.stall_warned  = False
+        self.stall_aborted = False
+        try:
+            snap = self._arm_state.snapshot()
+            live_joints = list(snap.get('joints', []) or [])
+            if len(live_joints) >= 4:
+                th_live, _, _ = fk_polar(live_joints)
+                self._hybrid_theta = float(max(
+                    HYBRID_SWEEP_THETA_LO,
+                    min(HYBRID_SWEEP_THETA_HI, th_live),
+                ))
+            mid = 0.5 * (HYBRID_SWEEP_THETA_LO + HYBRID_SWEEP_THETA_HI)
+            self._hybrid_dir = +1 if self._hybrid_theta < mid else -1
+            # Force arm state r/z to sweep nominal. The next _send_move
+            # will walk the arm there at the current slew rate.
+            if HYBRID_THETA_DRIVE:
+                with self._arm_state._lock:
+                    self._arm_state.r = HYBRID_SWEEP_R_NOMINAL
+                    self._arm_state.z = HYBRID_SWEEP_Z_NOMINAL
+        except Exception:
+            self._hybrid_theta = 90.0
+            self._hybrid_dir   = +1
 
         self._ir_thread = threading.Thread(
             target=self._ir_monitor_loop, daemon=True,
@@ -449,10 +513,46 @@ class RLSweeper:
             action_n = np.clip(action_n, -1.0, 1.0).astype(np.float32)
             raw      = BraccioBaseEnv.denormalize_action(action_n)
 
-            # Commanded pose (clamped)
-            new_theta = float(np.clip(arm_snap['theta'] + raw[0], 0.0, 180.0))
-            new_r     = float(np.clip(arm_snap['r']     + raw[1], R_MIN, R_MAX))
-            new_z     = float(np.clip(arm_snap['z']     + raw[2], Z_MIN, Z_MAX))
+            # ── HYBRID θ CONTROL ──────────────────────────────────────
+            # The classical sweep oscillator advances θ each tick by
+            # HYBRID_SWEEP_DEG_PER_TICK, reversing at 0° / 180°. This
+            # guarantees a visible 0↔180 sweep even if the policy
+            # produces tiny or zero Δθ actions. The policy's Δθ output
+            # is added as a small correction (clipped) so it can still
+            # nudge the sweep direction for obstacle avoidance, but
+            # can't force the arm to stand still.
+            if HYBRID_THETA_DRIVE:
+                # Advance the internal setpoint.
+                self._hybrid_theta += self._hybrid_dir * HYBRID_SWEEP_DEG_PER_TICK
+                if self._hybrid_theta >= HYBRID_SWEEP_THETA_HI:
+                    self._hybrid_theta = HYBRID_SWEEP_THETA_HI
+                    self._hybrid_dir = -1
+                elif self._hybrid_theta <= HYBRID_SWEEP_THETA_LO:
+                    self._hybrid_theta = HYBRID_SWEEP_THETA_LO
+                    self._hybrid_dir = +1
+                # Clip policy theta correction to ±HYBRID_POLICY_THETA_CLIP.
+                theta_correction = float(np.clip(
+                    raw[0], -HYBRID_POLICY_THETA_CLIP, HYBRID_POLICY_THETA_CLIP,
+                ))
+                new_theta = float(np.clip(
+                    self._hybrid_theta + theta_correction, 0.0, 180.0,
+                ))
+                # r/z corrections clipped to small per-tick delta and
+                # absolute value clamped to the sweep window.
+                dr_clipped = float(np.clip(raw[1],
+                                             -HYBRID_POLICY_R_CLIP,
+                                             +HYBRID_POLICY_R_CLIP))
+                dz_clipped = float(np.clip(raw[2],
+                                             -HYBRID_POLICY_Z_CLIP,
+                                             +HYBRID_POLICY_Z_CLIP))
+                new_r = float(np.clip(arm_snap['r'] + dr_clipped,
+                                        *HYBRID_SWEEP_R_RANGE))
+                new_z = float(np.clip(arm_snap['z'] + dz_clipped,
+                                        *HYBRID_SWEEP_Z_RANGE))
+            else:
+                new_theta = float(np.clip(arm_snap['theta'] + raw[0], 0.0, 180.0))
+                new_r     = float(np.clip(arm_snap['r']     + raw[1], R_MIN, R_MAX))
+                new_z     = float(np.clip(arm_snap['z']     + raw[2], Z_MIN, Z_MAX))
             new_delta = int(np.clip(round(arm_snap['delta'] + raw[3]),
                                     DELTA_MIN, DELTA_MAX))
 

@@ -111,11 +111,17 @@ REPLAN_RECOVERY_BONUS    = 5.00   # one-shot, fires when obstacle clears
 
 # Fix H: Sweep-cycle completion bonus. Delivered by the sim env each
 # time the arm crosses θ=90 from one side to the other without
-# colliding. Reduced from 2.5 → 1.0 because at 2.5 the free-sweep case
-# dominated the expected-reward surface and SAC ignored on-path
-# episodes entirely. The bonus is still meaningful but no longer the
-# only way to earn large reward.
+# colliding.
 HALF_SWEEP_BONUS     = 1.00
+
+# Idleness penalty. Flat per-step penalty when the arm made no
+# meaningful motion on the theta or r axis. This is the direct
+# counter-force against "stop is optimal" — SAC cannot earn a
+# passive baseline reward anymore; every stationary tick costs
+# -IDLE_PENALTY. The policy MUST move to break even, even in free
+# sweep. Large enough to dominate the ~0.02 speed-cost penalty.
+IDLE_PENALTY         = 0.20
+IDLE_MOTION_THRESH_N = 0.05   # |Δθ_n| + |Δr_n| < this → idle
 
 
 # ── Helpers: un-normalise obs fields ────────────────────────────────────────
@@ -278,6 +284,17 @@ def compute_reward(obs:          np.ndarray,
     # obstacle-aware sweep").
     if info.get('half_sweep_completed', False):
         r += HALF_SWEEP_BONUS
+
+    # ── 10. Idle penalty ─────────────────────────────────────────────────
+    # Direct penalty for NOT MOVING. The previous reward shape let
+    # the policy earn a passive baseline by sitting still (no speed
+    # penalty, no proximity change). This term makes standing still
+    # strictly worse than advancing — the ONLY way to earn ≥0 per
+    # step is to actually move. Prevents the "converge on zero
+    # action" failure mode observed in two retrain iterations.
+    motion_mag = abs(float(action_n[0])) + abs(float(action_n[1]))
+    if motion_mag < IDLE_MOTION_THRESH_N:
+        r -= IDLE_PENALTY
 
     return float(r)
 

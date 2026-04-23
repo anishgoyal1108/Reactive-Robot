@@ -109,8 +109,80 @@ def train(
     Returns path to the best saved model checkpoint.
     """
     from stable_baselines3 import SAC
-    from stable_baselines3.common.callbacks import EvalCallback
+    from stable_baselines3.common.callbacks import EvalCallback, BaseCallback
     from stable_baselines3.common.vec_env import DummyVecEnv
+
+
+    class ReplanBehaviorCallback(BaseCallback):
+        """Runs a mini test_replan probe during training so the operator
+        can see — live — whether the policy is actually learning to go
+        AROUND on-path obstacles (the task) vs. just harvesting bonuses
+        in free-sweep episodes. Prints two numbers at every eval tick:
+
+          theta_travel_free    : θ range swept when obstacle is RANDOM
+          theta_travel_blocked : θ range swept when obstacle is ON-PATH
+
+        A healthy policy has both > 30°. A policy stuck at "stop" has
+        theta_travel_blocked near 0° — visible every eval, instead of
+        discovering it only after training finishes.
+        """
+
+        def __init__(self, probe_every_n_steps: int = 20_000,
+                      verbose: int = 1):
+            super().__init__(verbose)
+            self._probe_every = probe_every_n_steps
+            self._last_probe = 0
+
+        def _on_step(self) -> bool:
+            if self.num_timesteps - self._last_probe < self._probe_every:
+                return True
+            self._last_probe = self.num_timesteps
+            # Import lazily so this file still imports if test_replan has deps
+            # that aren't available early.
+            try:
+                from braccio_ctrl.sim.braccio_env import BraccioSimEnv
+            except Exception:
+                return True
+            # Build a fresh env just for probing (eval_env is a vec env
+            # and setting obstacle placement there is intrusive).
+            probe_env = BraccioSimEnv(gui=False, seed=99)
+            try:
+                free_travel = self._probe_scenario(probe_env,
+                                                    force_on_path=False)
+                blocked_travel = self._probe_scenario(probe_env,
+                                                       force_on_path=True)
+            finally:
+                probe_env.close()
+            tag_free    = "✓" if free_travel    > 30.0 else "·"
+            tag_blocked = "✓" if blocked_travel > 30.0 else "FROZEN"
+            msg = (
+                f"[replan-probe @ {self.num_timesteps} steps] "
+                f"free={free_travel:5.1f}° {tag_free}  "
+                f"blocked={blocked_travel:5.1f}° {tag_blocked}"
+            )
+            print(msg)
+            log.info(msg)
+            return True
+
+        def _probe_scenario(self, env, *, force_on_path: bool,
+                             n_steps: int = 60) -> float:
+            import numpy as np
+            obs, _ = env.reset()
+            if force_on_path:
+                t_mid = 0.5 * (env._theta + env._goal_theta)
+                env._obs_theta   = float(t_mid)
+                env._obs_r_mm    = float(env._goal_r)
+                env._obs_z_mm    = float(env._goal_z)
+                env._obs_radius  = 90.0
+                env._recreate_obstacle()
+            thetas = [env._theta]
+            for _ in range(n_steps):
+                action, _ = self.model.predict(obs, deterministic=False)
+                obs, _, term, trunc, _ = env.step(action)
+                thetas.append(env._theta)
+                if term:
+                    break
+            return max(thetas) - min(thetas)
 
     # ── Environments ─────────────────────────────────────────────────────────
     log.info("Building %d training env(s) ...", n_envs)
@@ -169,11 +241,21 @@ def train(
         render               = False,
     )
 
+    # Live behavioral probe — every 20k steps, print whether the policy
+    # can actually maneuver when the obstacle blocks the direct path.
+    # This is the ONLY signal that tells you the policy is on track
+    # during training; scalar eval_reward doesn't distinguish
+    # "successfully maneuvering" from "avoiding obstacles by not moving".
+    replan_cb = ReplanBehaviorCallback(
+        probe_every_n_steps=max(20_000, eval_freq),
+        verbose=1,
+    )
+
     # ── Train ─────────────────────────────────────────────────────────────────
     log.info("Starting SAC training for %d steps ...", total_steps)
     model.learn(
         total_timesteps = total_steps,
-        callback        = eval_cb,
+        callback        = [eval_cb, replan_cb],
         progress_bar    = True,
     )
 

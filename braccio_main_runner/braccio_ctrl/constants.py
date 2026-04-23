@@ -357,6 +357,13 @@ KEY_BINDINGS = {
     # ── Sweep / IMU controls ──────────────────────────────────────────────
     ord('z'): 'sweep_toggle',
     ord('Z'): 'sweep_toggle',
+    # ── Naïve demo-sweep — bypasses the safety BT + policy entirely.
+    # Oscillates θ 0°↔180° at NAIVE_SWEEP_DEG_PER_S by issuing SET ALL
+    # commands directly, with an IR-bits emergency stop. Use when BOTH
+    # the RL policy and the classical BT sweep misbehave — guaranteed to
+    # move the arm visibly for demo purposes.
+    ord('n'): 'naive_sweep_toggle',
+    ord('N'): 'naive_sweep_toggle',
     ord('c'): 'imu_calibrate',
     ord('C'): 'imu_calibrate',
     # ── Strict-mode toggle (safety dialog on/off) ────────────────────────

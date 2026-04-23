@@ -227,6 +227,17 @@ class BraccioController:
         # RL deployment (optional — only active when --rl-policy is passed)
         self._rl_policy_path = rl_policy_path
         self._rl_sweeper = None          # built lazily in _curses_main
+        # Set to True after the RLSweeper auto-aborts; Z then routes to the
+        # classical BT sweep instead of restarting the broken RL policy.
+        # The user can still re-enable RL by restarting the controller.
+        self._rl_aborted_this_session = False
+
+        # Naïve demo sweep — bypasses BT + policy, just oscillates θ at
+        # the hardware level with IR-bits emergency stop. Wakes up on
+        # the N key for guaranteed motion when BOTH RL and BT fail.
+        import threading as _th
+        self._naive_stop_event = _th.Event()
+        self._naive_thread = None   # threading.Thread | None
 
         # Track BT state transitions for edge-triggered events
         self._prev_bt_mode = "idle"
@@ -409,25 +420,24 @@ class BraccioController:
             if self._rl_sweeper is not None:
                 sweeper_err = getattr(self._rl_sweeper.policy_ref,
                                        "last_error", None)
-                # Surface an RLSweeper stall too — the deterministic-
-                # policy infinite-loop bug used to look like "the arm
-                # just hangs" with no UI feedback. Stall counter is
-                # incremented on the sweeper's tick loop.
                 sweeper_stall_count = int(getattr(self._rl_sweeper,
                                                     "_stall_count", 0))
                 sweeper_stalled = bool(getattr(self._rl_sweeper,
                                                  "stall_warned", False))
                 sweeper_aborted = bool(getattr(self._rl_sweeper,
                                                  "stall_aborted", False))
+            # Latch session-wide abort flag once (this also gets set in
+            # sweep_toggle when the user hits Z after an abort).
+            if sweeper_aborted and not self._rl_aborted_this_session:
+                self._rl_aborted_this_session = True
             with self._state._lock:
-                if sweeper_aborted:
-                    self._state.last_error = (
-                        "RL sweeper AUTO-ABORTED (policy stuck). "
-                        "Press Z for classical sweep, or move manually."
-                    )
-                elif sweeper_err:
+                # Only write to last_error if there's an ACTIVE problem.
+                # The session-wide abort flag is informational and does
+                # not block the UI — the Z-key routing now uses classical
+                # BT sweep automatically, so there's no user action needed.
+                if sweeper_err:
                     self._state.last_error = f"RL POLICY ERR: {sweeper_err}"
-                elif sweeper_stalled:
+                elif sweeper_stalled and not sweeper_aborted:
                     self._state.last_error = (
                         f"RL STALL: {sweeper_stall_count} ticks — "
                         f"press any manual key to take over"
@@ -789,16 +799,28 @@ class BraccioController:
             return
         # ── Autonomous sweep ──────────────────────────────────────────────
         if action == "sweep_toggle":
-            if self._rl_sweeper is not None:
-                # RL policy mode: Z key drives RLSweeper, not the safety BT.
+            # Check if the RL sweeper was auto-aborted this session — if so,
+            # Z now routes to the classical BT sweep instead of restarting
+            # the broken RL policy. The user explicitly has to restart the
+            # controller to re-enable RL.
+            rl_available = (
+                self._rl_sweeper is not None
+                and not self._rl_aborted_this_session
+                and not getattr(self._rl_sweeper, "stall_aborted", False)
+            )
+            # Also latch stall_aborted → session-wide flag so RL stays off
+            # even if the user toggles through other sweep modes.
+            if (self._rl_sweeper is not None
+                    and getattr(self._rl_sweeper, "stall_aborted", False)):
+                self._rl_aborted_this_session = True
+
+            if rl_available:
                 if self._rl_sweeper.running():
                     self._rl_sweeper.stop()
                     with self._state._lock:
                         self._state.last_resp = "RL sweep stopped"
+                        self._state.last_error = ""
                 else:
-                    # Ensure the safety BT isn't running its own sweep —
-                    # otherwise both would be sending SET ALL commands.
-                    # Fix D (dual-writer guard, symmetric side).
                     try:
                         self._safety.stop_sweep()
                     except Exception:
@@ -806,16 +828,37 @@ class BraccioController:
                     self._rl_sweeper.start()
                     with self._state._lock:
                         self._state.last_resp = "RL sweep started"
+                        self._state.last_error = ""
             else:
+                # Fallback: classical BT sweep. Either no RL policy loaded,
+                # or RL auto-aborted earlier in this session.
+                if self._rl_sweeper is not None:   # log the reason once
+                    with self._state._lock:
+                        if self._rl_aborted_this_session:
+                            self._state.last_resp = (
+                                "RL disabled (auto-aborted). "
+                                "Using classical BT sweep."
+                            )
                 safety_snap = self._safety.snapshot()
                 if safety_snap.get("mode") == "sweep":
                     self._safety.stop_sweep()
                     with self._state._lock:
-                        self._state.last_resp = "Sweep stopped"
+                        self._state.last_resp = "BT sweep stopped"
+                        self._state.last_error = ""
                 else:
                     self._safety.start_sweep()
                     with self._state._lock:
-                        self._state.last_resp = "Sweep started"
+                        self._state.last_resp = "BT sweep started"
+                        self._state.last_error = ""
+            return
+
+        # ── Naïve demo sweep (N key — bypasses BT + policy entirely) ──────
+        if action == "naive_sweep_toggle":
+            # Also stop any other sweep mode first.
+            if (self._rl_sweeper is not None
+                    and self._rl_sweeper.running()):
+                self._rl_sweeper.stop()
+            self._toggle_naive_sweep()
             return
         # ── IMU calibration ───────────────────────────────────────────────
         if action == "imu_calibrate":
@@ -1059,6 +1102,107 @@ class BraccioController:
             cmd = cmd_set_delta(d)
             self._state.last_cmd = cmd.strip()
         self._bridge.send_cmd(cmd)
+
+    # ── Naïve demo sweep ──────────────────────────────────────────────────
+    # Bypasses everything — no BT, no world model, no policy, no IK drift
+    # concerns — and just oscillates the base joint back and forth. This
+    # is the demo safety net when both the RL policy AND the classical
+    # safety BT sweep misbehave. Uses IR-bits as an emergency halt
+    # (stops immediately if IR fires). Not clever; just moves.
+
+    _NAIVE_SWEEP_HZ       = 10.0    # tick rate (Hz)
+    _NAIVE_SWEEP_STEP_DEG = 4.0     # theta step per tick → 40°/s
+    _NAIVE_SWEEP_LO_DEG   = 0.0
+    _NAIVE_SWEEP_HI_DEG   = 180.0
+
+    def _naive_sweep_running(self) -> bool:
+        t = self._naive_thread
+        return t is not None and t.is_alive() and not self._naive_stop_event.is_set()
+
+    def _toggle_naive_sweep(self) -> None:
+        """Start or stop the naïve open-loop theta sweep."""
+        if self._naive_sweep_running():
+            self._naive_stop_event.set()
+            with self._state._lock:
+                self._state.last_resp = "naive sweep stopped"
+                self._state.last_error = ""
+            return
+        # Stop anything else first so we don't race on the serial bridge.
+        if self._rl_sweeper is not None and self._rl_sweeper.running():
+            self._rl_sweeper.stop()
+        try:
+            self._safety.stop_sweep()
+        except Exception:
+            pass
+        self._naive_stop_event.clear()
+        import threading
+        self._naive_thread = threading.Thread(
+            target=self._naive_sweep_loop,
+            daemon=True,
+            name="naive-sweep",
+        )
+        self._naive_thread.start()
+        with self._state._lock:
+            self._state.last_resp = "naive sweep started (θ 0° ↔ 180°)"
+            self._state.last_error = ""
+
+    def _naive_sweep_loop(self) -> None:
+        """Oscillate base joint between 0° and 180°, holding S/E/WV/WR/G
+        at HOME_POS values. Emergency-stops on IR bits >= IR_STOP_THRESHOLD.
+        """
+        import time as _t
+        tick = 1.0 / self._NAIVE_SWEEP_HZ
+        step = self._NAIVE_SWEEP_STEP_DEG
+        theta_world = 90.0
+        direction = +1.0
+        # Base joints locked at HOME to minimise chance of self-collision.
+        S, E, WV = 90, 90, 90
+        with self._state._lock:
+            wr = int(self._state.wrist_rot)
+            g = int(self._state.gripper)
+
+        # Slew rate — moderate; not the slowest (=1) so motion is visible.
+        try:
+            self._bridge.send_cmd(cmd_set_delta(3))
+        except Exception:
+            pass
+
+        while not self._naive_stop_event.is_set():
+            # IR estop
+            ir_bits = int(self._tof_state.snapshot().get("ir_bits", 0))
+            if ir_bits >= 3:
+                with self._state._lock:
+                    self._state.last_error = (
+                        f"naive sweep halted: IR DANGER ({ir_bits})"
+                    )
+                break
+
+            # Advance theta; flip at endpoints.
+            theta_world += direction * step
+            if theta_world >= self._NAIVE_SWEEP_HI_DEG:
+                theta_world = self._NAIVE_SWEEP_HI_DEG
+                direction = -1.0
+            elif theta_world <= self._NAIVE_SWEEP_LO_DEG:
+                theta_world = self._NAIVE_SWEEP_LO_DEG
+                direction = +1.0
+
+            # Convert θ_world to B_cmd via the physical-servo flip.
+            B_cmd = int(round(180.0 - theta_world))
+            joints = [B_cmd, S, E, WV, wr, g]
+            try:
+                cmd = cmd_set_all(joints)
+                with self._state._lock:
+                    self._state.joints = list(joints)
+                    self._state.theta = float(theta_world)
+                    self._state.last_cmd = cmd.strip()
+                self._bridge.send_cmd(cmd)
+            except Exception as exc:
+                log.warning("naive sweep send failed: %s", exc)
+
+            self._naive_stop_event.wait(tick)
+
+        with self._state._lock:
+            self._state.last_resp = "naive sweep stopped"
 
     def _send_home(self) -> None:
         """Route to the equilibrium pose through the safety stack.

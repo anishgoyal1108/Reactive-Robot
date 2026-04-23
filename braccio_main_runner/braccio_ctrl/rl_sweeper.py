@@ -26,6 +26,7 @@ Human feedback (optional):
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 import logging
@@ -73,6 +74,26 @@ HYBRID_SWEEP_R_NOMINAL    = 152.0
 HYBRID_SWEEP_Z_NOMINAL    = 60.0
 HYBRID_SWEEP_R_RANGE      = (80.0, 220.0)
 HYBRID_SWEEP_Z_RANGE      = (-20.0, 120.0)
+# At θ extremes (|θ-90°| > ENDPOINT_TIGHTEN_DEG) the arm reaches
+# further horizontally and the IK's CGx↔physical convention offset
+# means a commanded low z can put the PHYSICAL elbow or gripper
+# below the table. Raise the minimum z when approaching either
+# endpoint. This is the deterministic workaround for the
+# "touches ground at θ extremes" bug — the principled fix is an
+# FK round-trip check via fk_tip_physical, but this clamp is
+# cheap and demo-verifiable today.
+HYBRID_ENDPOINT_TIGHTEN_DEG = 50.0   # |θ-90°| > this → tightened clamp
+HYBRID_ENDPOINT_Z_MIN_MM    = 40.0   # z floor at endpoints (was −20 base)
+
+# Velocity-scaled reflex brake. Fired when either ToF primary channel
+# reads closer than (base_margin + velocity_gain * tick_rate_mm). The
+# brake freezes θ advance for the tick and bumps z upward by 10 mm —
+# gives a deterministic, non-learned safety layer on top of the RL
+# policy. Addresses the user's "runs into my hand" complaint.
+# See fred/camera_control/obstacle_avoidance.py for the pattern.
+REFLEX_BASE_MARGIN_MM    = 120.0    # minimum stand-off
+REFLEX_VELOCITY_GAIN     = 1.5      # × (sweep_deg_per_tick × tick_hz)
+REFLEX_Z_LIFT_MM         = 10.0     # bump z up this much during brake
 
 # Stall detector: after this many consecutive ticks where ``_send_move``
 # rejected the policy's target (unreachable or zero-motion), the sweeper
@@ -547,14 +568,61 @@ class RLSweeper:
                                              +HYBRID_POLICY_Z_CLIP))
                 new_r = float(np.clip(arm_snap['r'] + dr_clipped,
                                         *HYBRID_SWEEP_R_RANGE))
-                new_z = float(np.clip(arm_snap['z'] + dz_clipped,
-                                        *HYBRID_SWEEP_Z_RANGE))
+                # z clamp: tighten the low end near θ extremes where the
+                # IK produces curled poses whose physical tip clips below
+                # the table. Keeps the arm "in the air" across the full
+                # sweep range.
+                z_lo, z_hi = HYBRID_SWEEP_Z_RANGE
+                if abs(new_theta - 90.0) > HYBRID_ENDPOINT_TIGHTEN_DEG:
+                    z_lo = max(z_lo, HYBRID_ENDPOINT_Z_MIN_MM)
+                new_z = float(np.clip(arm_snap['z'] + dz_clipped, z_lo, z_hi))
             else:
                 new_theta = float(np.clip(arm_snap['theta'] + raw[0], 0.0, 180.0))
                 new_r     = float(np.clip(arm_snap['r']     + raw[1], R_MIN, R_MAX))
                 new_z     = float(np.clip(arm_snap['z']     + raw[2], Z_MIN, Z_MAX))
             new_delta = int(np.clip(round(arm_snap['delta'] + raw[3]),
                                     DELTA_MIN, DELTA_MAX))
+
+            # ── Reflex brake (deterministic safety layer) ─────────────
+            # If any primary ToF channel reads closer than the velocity-
+            # scaled margin, freeze θ advance, bump z up, and drop the
+            # slew rate one notch. Fires independently of the policy so
+            # the arm reacts to approaching obstacles even when the
+            # learned controller is slow to respond. Addresses the
+            # "arm runs into my hand" report.
+            if HYBRID_THETA_DRIVE:
+                tof_snap = self._tof_state.snapshot()
+                grids = tof_snap.get('grids', [None] * 4) or [None] * 4
+                def _cell_min(g):
+                    if g is None or getattr(g, 'size', 0) == 0:
+                        return float('inf')
+                    arr = np.asarray(g, dtype=np.float32).flatten()
+                    valid = arr[np.isfinite(arr)]
+                    return float(valid.min()) if valid.size else float('inf')
+                ch0_min = _cell_min(grids[0] if len(grids) > 0 else None)
+                ch1_min = _cell_min(grids[1] if len(grids) > 1 else None)
+                tip_speed_mm_per_s = (
+                    HYBRID_SWEEP_DEG_PER_TICK * self.tick_hz
+                    * (math.pi / 180.0) * max(new_r, 1.0)
+                )
+                reflex_margin = (
+                    REFLEX_BASE_MARGIN_MM
+                    + REFLEX_VELOCITY_GAIN
+                    * (HYBRID_SWEEP_DEG_PER_TICK * self.tick_hz)
+                )
+                min_mm = min(ch0_min, ch1_min)
+                if min_mm < reflex_margin:
+                    # Brake: hold θ, lift z.
+                    new_theta = float(arm_snap['theta'])
+                    new_z = min(new_z + REFLEX_Z_LIFT_MM,
+                                HYBRID_SWEEP_Z_RANGE[1])
+                    new_delta = max(DELTA_MIN, new_delta - 1)
+                    # Stamp status so the controller's UI shows why.
+                    with self._arm_state._lock:
+                        self._arm_state.last_error = (
+                            f"REFLEX BRAKE: obstacle {min_mm:.0f} mm "
+                            f"(margin {reflex_margin:.0f}) — lifting z"
+                        )
 
             # Stall detection. A tick is a stall if _send_move rejected it
             # OR the commanded target is ~identical to the current pose

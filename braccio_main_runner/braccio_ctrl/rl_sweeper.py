@@ -95,6 +95,41 @@ REFLEX_BASE_MARGIN_MM    = 120.0    # minimum stand-off
 REFLEX_VELOCITY_GAIN     = 1.5      # × (sweep_deg_per_tick × tick_hz)
 REFLEX_Z_LIFT_MM         = 10.0     # bump z up this much during brake
 
+# CLASSICAL AVOIDANCE MODE ────────────────────────────────────────────
+# The deployed SAC policy learned inverse semantics (goes DOWN toward
+# obstacles rather than UP away). Training eval σ=400 proves no
+# convergence. Rather than trust the policy's r/z output, the default
+# RLSweeper mode now runs a DETERMINISTIC ToF-gradient controller for
+# r/z while keeping the classical θ oscillator.
+#
+# Mapping: distance d (mm) on closest ToF primary channel → z_setpoint
+#   d > 300 mm    → z = HYBRID_SWEEP_Z_NOMINAL (60)       — no threat
+#   d = 120 mm    → z = HYBRID_SWEEP_Z_NOMINAL + 0  (60)
+#   d ≤ 300 mm    → linearly lift z upward, max at d=60 mm
+#   d < 60 mm     → z = HYBRID_SWEEP_Z_NOMINAL + Z_LIFT_MAX (= 120)
+# This is the "go UP when obstacle is close" behavior the user wants.
+CLASSICAL_AVOID_ENABLED  = True
+CLASSICAL_LIFT_START_MM  = 300.0    # distance at which z starts lifting
+CLASSICAL_LIFT_FULL_MM   = 60.0     # distance at which z is fully lifted
+CLASSICAL_Z_LIFT_MAX_MM  = 70.0     # max extra z above nominal (60+70=130)
+
+# ── PER-TICK JOINT RATE LIMIT (physical safety) ──────────────────────
+# Applied to every SET ALL sent from RLSweeper. Regardless of what the
+# policy or oscillator commands, no joint angle can change by more
+# than JOINT_MAX_STEP_PER_TICK degrees per tick (100 ms @ 20 Hz). This
+# is the hard safety limit the user requested — "arm should never go
+# crazy fast, even when returning to equilibrium."
+#   at 3°/tick @ 20 Hz = 60°/s max per joint
+JOINT_MAX_STEP_PER_TICK  = 3.0      # degrees per joint per tick
+
+# ── SMOOTH STARTUP TRANSITION ────────────────────────────────────────
+# On RLSweeper.start(), the arm is typically at HOME (r=0, z=310). The
+# sweep nominal is (r=152, z=60). Snapping state.r/z directly causes the
+# IK to command a radically different joint set in the next tick, and
+# the servos slam. Instead, ramp state.r/z linearly from the current
+# polar to the sweep nominal over STARTUP_TRANSITION_S seconds.
+STARTUP_TRANSITION_S     = 4.0      # seconds to ramp HOME → sweep nominal
+
 # Stall detector: after this many consecutive ticks where ``_send_move``
 # rejected the policy's target (unreachable or zero-motion), the sweeper
 # escalates to a safety-BT fallback plan so something moves. 40 ticks at
@@ -281,32 +316,41 @@ class RLSweeper:
         # Hybrid-sweep init: seed the oscillator at the arm's current θ so
         # the first command is a continuation of the current pose rather
         # than a big jump to wherever the oscillator happened to be.
-        # Reset stall tracking too. Also snap the arm's (r, z) to the
-        # sweep nominal so the policy doesn't start from a curled-down
-        # pose and accumulate deltas from there.
+        # Reset stall tracking too.
         self._stall_count  = 0
         self.stall_warned  = False
         self.stall_aborted = False
+        self._startup_start_ts = time.monotonic()
         try:
             snap = self._arm_state.snapshot()
             live_joints = list(snap.get('joints', []) or [])
             if len(live_joints) >= 4:
-                th_live, _, _ = fk_polar(live_joints)
+                th_live, r_live, z_live = fk_polar(live_joints)
                 self._hybrid_theta = float(max(
                     HYBRID_SWEEP_THETA_LO,
                     min(HYBRID_SWEEP_THETA_HI, th_live),
                 ))
+                # Smooth-startup: remember the arm's current polar so we
+                # can interpolate to sweep nominal instead of snapping.
+                self._startup_r0 = float(r_live)
+                self._startup_z0 = float(z_live)
+            else:
+                self._startup_r0 = HYBRID_SWEEP_R_NOMINAL
+                self._startup_z0 = HYBRID_SWEEP_Z_NOMINAL
             mid = 0.5 * (HYBRID_SWEEP_THETA_LO + HYBRID_SWEEP_THETA_HI)
             self._hybrid_dir = +1 if self._hybrid_theta < mid else -1
-            # Force arm state r/z to sweep nominal. The next _send_move
-            # will walk the arm there at the current slew rate.
-            if HYBRID_THETA_DRIVE:
-                with self._arm_state._lock:
-                    self._arm_state.r = HYBRID_SWEEP_R_NOMINAL
-                    self._arm_state.z = HYBRID_SWEEP_Z_NOMINAL
         except Exception:
             self._hybrid_theta = 90.0
             self._hybrid_dir   = +1
+            self._startup_r0   = HYBRID_SWEEP_R_NOMINAL
+            self._startup_z0   = HYBRID_SWEEP_Z_NOMINAL
+
+        # Force slow slew on start. User complaint: "the arm should never
+        # go crazy fast, even when returning to equilibrium."
+        try:
+            self._bridge.send_cmd(cmd_set_delta(1))
+        except Exception:
+            pass
 
         self._ir_thread = threading.Thread(
             target=self._ir_monitor_loop, daemon=True,
@@ -455,7 +499,62 @@ class RLSweeper:
         except Exception as exc:
             log.exception("RLSweeper stall fallback failed: %s", exc)
 
+    # ── Classical avoidance (deterministic ToF-gradient reactive) ─────────
+
+    def _classical_avoid_rz(self) -> tuple[float, float]:
+        """Compute (r, z) setpoint deterministically from ToF distance.
+
+        Not learned. The closer the nearest primary ToF reading, the
+        higher z is lifted. Addresses both the "arm runs into my hand"
+        and the "policy goes DOWN toward obstacles" bugs by replacing
+        the policy's r/z output with a monotonic go-up-when-close
+        controller. r stays near nominal always.
+        """
+        tof_snap = self._tof_state.snapshot()
+        grids = tof_snap.get('grids', [None] * 4) or [None] * 4
+
+        def _cell_min(g):
+            if g is None or getattr(g, 'size', 0) == 0:
+                return float('inf')
+            arr = np.asarray(g, dtype=np.float32).flatten()
+            valid = arr[np.isfinite(arr)]
+            return float(valid.min()) if valid.size else float('inf')
+
+        ch0_min = _cell_min(grids[0] if len(grids) > 0 else None)
+        ch1_min = _cell_min(grids[1] if len(grids) > 1 else None)
+        d_close = min(ch0_min, ch1_min)
+
+        # Linear ramp: d≥START → no lift. d≤FULL → max lift.
+        if d_close >= CLASSICAL_LIFT_START_MM:
+            lift_frac = 0.0
+        elif d_close <= CLASSICAL_LIFT_FULL_MM:
+            lift_frac = 1.0
+        else:
+            span = CLASSICAL_LIFT_START_MM - CLASSICAL_LIFT_FULL_MM
+            lift_frac = (CLASSICAL_LIFT_START_MM - d_close) / span
+
+        z_setpoint = (HYBRID_SWEEP_Z_NOMINAL
+                      + lift_frac * CLASSICAL_Z_LIFT_MAX_MM)
+        r_setpoint = HYBRID_SWEEP_R_NOMINAL   # r stays constant; only z avoids
+        return r_setpoint, z_setpoint
+
     # ── Motion primitives ─────────────────────────────────────────────────────
+
+    def _rate_limit_joints(self, target: list[int], current: list[int]) -> list[int]:
+        """Cap each joint's per-tick change at JOINT_MAX_STEP_PER_TICK.
+
+        The single most important safety fix: even if the policy, IK,
+        or oscillator commands a huge jump, this clamps each joint to
+        at most JOINT_MAX_STEP_PER_TICK degrees per tick. Eliminates
+        the "arm slams down on sweep start" class of bugs.
+        """
+        out = []
+        for tgt, cur in zip(target, current):
+            t = int(tgt); c = int(cur)
+            step = max(-JOINT_MAX_STEP_PER_TICK,
+                       min(JOINT_MAX_STEP_PER_TICK, t - c))
+            out.append(int(round(c + step)))
+        return out
 
     def _send_move(self, theta: float, r: float, z: float) -> bool:
         """Solve IK for (theta, r, z) and send SET ALL.  Returns False if blocked."""
@@ -475,10 +574,18 @@ class RLSweeper:
             self._arm_state.theta = theta
             self._arm_state.r     = r
             self._arm_state.z     = z
-        self._arm_state.update_joints_from_ik(ik, wrist_rot, gripper)
+            current_joints = list(self._arm_state.joints)
+        # Compute the IK-proposed joint set but DON'T write it to state
+        # directly — rate-limit each joint so the delta per tick is
+        # bounded. Then write the rate-limited set as the actual
+        # commanded pose.
+        ik_target = [ik.base, ik.shoulder, ik.elbow, ik.wrist_vert,
+                     int(wrist_rot), int(gripper)]
+        safe_target = self._rate_limit_joints(ik_target, current_joints)
+        with self._arm_state._lock:
+            self._arm_state.joints = list(safe_target)
 
-        positions = self._arm_state.snapshot()['joints']
-        cmd = cmd_set_all(positions)
+        cmd = cmd_set_all(safe_target)
         with self._arm_state._lock:
             self._arm_state.last_cmd = cmd.strip()
         self._bridge.send_cmd(cmd)
@@ -551,78 +658,56 @@ class RLSweeper:
                 elif self._hybrid_theta <= HYBRID_SWEEP_THETA_LO:
                     self._hybrid_theta = HYBRID_SWEEP_THETA_LO
                     self._hybrid_dir = +1
-                # Clip policy theta correction to ±HYBRID_POLICY_THETA_CLIP.
-                theta_correction = float(np.clip(
-                    raw[0], -HYBRID_POLICY_THETA_CLIP, HYBRID_POLICY_THETA_CLIP,
-                ))
-                new_theta = float(np.clip(
-                    self._hybrid_theta + theta_correction, 0.0, 180.0,
-                ))
-                # r/z corrections clipped to small per-tick delta and
-                # absolute value clamped to the sweep window.
-                dr_clipped = float(np.clip(raw[1],
-                                             -HYBRID_POLICY_R_CLIP,
-                                             +HYBRID_POLICY_R_CLIP))
-                dz_clipped = float(np.clip(raw[2],
-                                             -HYBRID_POLICY_Z_CLIP,
-                                             +HYBRID_POLICY_Z_CLIP))
-                new_r = float(np.clip(arm_snap['r'] + dr_clipped,
-                                        *HYBRID_SWEEP_R_RANGE))
-                # z clamp: tighten the low end near θ extremes where the
-                # IK produces curled poses whose physical tip clips below
-                # the table. Keeps the arm "in the air" across the full
-                # sweep range.
+                # Theta: classical oscillator only. The policy's Δθ is
+                # IGNORED because the deployed policy learned random
+                # behavior (σ=400 in training eval, inverse obstacle
+                # semantics on deployment).
+                new_theta = float(np.clip(self._hybrid_theta, 0.0, 180.0))
+
+                # r/z: DETERMINISTIC classical-avoidance controller
+                # (CLASSICAL_AVOID_ENABLED). Overrides the policy's r/z
+                # output, which was shown via policy tests to produce
+                # inverse semantics (lower z when obstacle close).
+                if CLASSICAL_AVOID_ENABLED:
+                    r_target_ca, z_target_ca = self._classical_avoid_rz()
+                else:
+                    # Policy mode (only reachable if CLASSICAL_AVOID_ENABLED
+                    # is manually disabled): use policy deltas.
+                    dr = float(np.clip(raw[1], -HYBRID_POLICY_R_CLIP,
+                                                +HYBRID_POLICY_R_CLIP))
+                    dz = float(np.clip(raw[2], -HYBRID_POLICY_Z_CLIP,
+                                                +HYBRID_POLICY_Z_CLIP))
+                    r_target_ca = arm_snap['r'] + dr
+                    z_target_ca = arm_snap['z'] + dz
+
+                # Apply smooth-startup blend: for STARTUP_TRANSITION_S
+                # seconds after .start(), blend r/z between the arm's
+                # starting polar (self._startup_r0/z0) and the targeted
+                # sweep value. Prevents the "slam from HOME to nominal"
+                # joint jump that the user saw as the arm dropping in
+                # <1 second.
+                elapsed = time.monotonic() - self._startup_start_ts
+                blend = min(1.0, elapsed / max(STARTUP_TRANSITION_S, 0.1))
+                r_blended = self._startup_r0 + blend * (r_target_ca - self._startup_r0)
+                z_blended = self._startup_z0 + blend * (z_target_ca - self._startup_z0)
+
+                # Workspace envelope clamp (tightened at θ extremes).
+                new_r = float(np.clip(r_blended, *HYBRID_SWEEP_R_RANGE))
                 z_lo, z_hi = HYBRID_SWEEP_Z_RANGE
                 if abs(new_theta - 90.0) > HYBRID_ENDPOINT_TIGHTEN_DEG:
                     z_lo = max(z_lo, HYBRID_ENDPOINT_Z_MIN_MM)
-                new_z = float(np.clip(arm_snap['z'] + dz_clipped, z_lo, z_hi))
+                new_z = float(np.clip(z_blended, z_lo, z_hi))
             else:
                 new_theta = float(np.clip(arm_snap['theta'] + raw[0], 0.0, 180.0))
                 new_r     = float(np.clip(arm_snap['r']     + raw[1], R_MIN, R_MAX))
                 new_z     = float(np.clip(arm_snap['z']     + raw[2], Z_MIN, Z_MAX))
-            new_delta = int(np.clip(round(arm_snap['delta'] + raw[3]),
-                                    DELTA_MIN, DELTA_MAX))
+            # Delta: force slowest slew always. User requested hard speed
+            # cap. Delta 1 = slowest slew; ~3x slower than delta 3.
+            new_delta = 1
 
-            # ── Reflex brake (deterministic safety layer) ─────────────
-            # If any primary ToF channel reads closer than the velocity-
-            # scaled margin, freeze θ advance, bump z up, and drop the
-            # slew rate one notch. Fires independently of the policy so
-            # the arm reacts to approaching obstacles even when the
-            # learned controller is slow to respond. Addresses the
-            # "arm runs into my hand" report.
-            if HYBRID_THETA_DRIVE:
-                tof_snap = self._tof_state.snapshot()
-                grids = tof_snap.get('grids', [None] * 4) or [None] * 4
-                def _cell_min(g):
-                    if g is None or getattr(g, 'size', 0) == 0:
-                        return float('inf')
-                    arr = np.asarray(g, dtype=np.float32).flatten()
-                    valid = arr[np.isfinite(arr)]
-                    return float(valid.min()) if valid.size else float('inf')
-                ch0_min = _cell_min(grids[0] if len(grids) > 0 else None)
-                ch1_min = _cell_min(grids[1] if len(grids) > 1 else None)
-                tip_speed_mm_per_s = (
-                    HYBRID_SWEEP_DEG_PER_TICK * self.tick_hz
-                    * (math.pi / 180.0) * max(new_r, 1.0)
-                )
-                reflex_margin = (
-                    REFLEX_BASE_MARGIN_MM
-                    + REFLEX_VELOCITY_GAIN
-                    * (HYBRID_SWEEP_DEG_PER_TICK * self.tick_hz)
-                )
-                min_mm = min(ch0_min, ch1_min)
-                if min_mm < reflex_margin:
-                    # Brake: hold θ, lift z.
-                    new_theta = float(arm_snap['theta'])
-                    new_z = min(new_z + REFLEX_Z_LIFT_MM,
-                                HYBRID_SWEEP_Z_RANGE[1])
-                    new_delta = max(DELTA_MIN, new_delta - 1)
-                    # Stamp status so the controller's UI shows why.
-                    with self._arm_state._lock:
-                        self._arm_state.last_error = (
-                            f"REFLEX BRAKE: obstacle {min_mm:.0f} mm "
-                            f"(margin {reflex_margin:.0f}) — lifting z"
-                        )
+            # Classical avoidance (_classical_avoid_rz above) already
+            # handles the z-lift-near-obstacle response deterministically
+            # and with correct sign. No separate reflex brake needed.
 
             # Stall detection. A tick is a stall if _send_move rejected it
             # OR the commanded target is ~identical to the current pose

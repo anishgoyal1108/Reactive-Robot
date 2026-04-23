@@ -405,6 +405,7 @@ class BraccioController:
             sweeper_err = None
             sweeper_stalled = False
             sweeper_stall_count = 0
+            sweeper_aborted = False
             if self._rl_sweeper is not None:
                 sweeper_err = getattr(self._rl_sweeper.policy_ref,
                                        "last_error", None)
@@ -416,13 +417,20 @@ class BraccioController:
                                                     "_stall_count", 0))
                 sweeper_stalled = bool(getattr(self._rl_sweeper,
                                                  "stall_warned", False))
+                sweeper_aborted = bool(getattr(self._rl_sweeper,
+                                                 "stall_aborted", False))
             with self._state._lock:
-                if sweeper_err:
+                if sweeper_aborted:
+                    self._state.last_error = (
+                        "RL sweeper AUTO-ABORTED (policy stuck). "
+                        "Press Z for classical sweep, or move manually."
+                    )
+                elif sweeper_err:
                     self._state.last_error = f"RL POLICY ERR: {sweeper_err}"
                 elif sweeper_stalled:
                     self._state.last_error = (
                         f"RL STALL: {sweeper_stall_count} ticks — "
-                        f"policy stuck; BT fallback engaging"
+                        f"press any manual key to take over"
                     )
                 elif rec_st["tick_fatal"]:
                     self._state.last_error = f"REC FATAL: {rec_st['tick_fatal']}"
@@ -933,23 +941,37 @@ class BraccioController:
         motion + error message" instead of state drifting quietly to
         unreachable coordinates on every keypress.
 
-        When the RLSweeper is active, manual keypresses are refused —
-        both the sweeper and the BT's manual branch would race on the
-        serial bridge and the arm's UI state would desynchronize from
-        the hardware. Press Z to stop the sweep before steering manually.
-        (Fix D for the deployment dual-writer race.)
+        When the RLSweeper is active and HEALTHY (not stalled), manual
+        keypresses are refused — both the sweeper and the BT's manual
+        branch would race on the serial bridge and the arm's UI state
+        would desynchronize from the hardware. However, when the
+        sweeper is stalled (the policy is misbehaving), manual keys
+        take over and auto-stop the sweeper so the user can rescue
+        the arm without having to press Z through a frozen UI.
+        (Fix D for the deployment dual-writer race, plus stall escape.)
         """
         state = self._state
-        if self._rl_sweeper is not None and self._rl_sweeper.running():
-            if prev_polar is not None:
+        sweeper = self._rl_sweeper
+        if sweeper is not None and sweeper.running():
+            # Escape hatch: if the sweeper is stalled, treat this
+            # keypress as an implicit "stop sweep" + manual override.
+            if getattr(sweeper, "stall_warned", False):
+                sweeper.stop()
                 with state._lock:
-                    state.theta, state.r, state.z = prev_polar
-            with state._lock:
-                state.last_error = (
-                    "manual keypress ignored — RLSweeper is active. "
-                    "Press Z to stop the RL sweep first."
-                )
-            return
+                    state.last_resp = (
+                        "RL sweep stopped (was stalled) — manual override active"
+                    )
+                # Fall through to normal IK path.
+            else:
+                if prev_polar is not None:
+                    with state._lock:
+                        state.theta, state.r, state.z = prev_polar
+                with state._lock:
+                    state.last_error = (
+                        "manual keypress ignored — RLSweeper is active. "
+                        "Press Z to stop the RL sweep first."
+                    )
+                return
         with state._lock:
             theta = state.theta
             r = state.r

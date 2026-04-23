@@ -56,6 +56,20 @@ _STALL_THRESHOLD      = 40
 # every ``_STALL_LOG_EVERY_N`` thereafter so the log doesn't get spammed.
 _STALL_LOG_FIRST      = 5
 _STALL_LOG_EVERY_N    = 100
+# Pause RLSweeper command dispatch for this many ticks after firing a
+# fallback. Without this, the sweeper's per-tick _send_move() at 20 Hz
+# interleaves with the BT's EMA-smoothed manual intent commands on the
+# same serial bridge — the BT's slow motion is overwritten by the
+# sweeper's near-zero "stay in place" commands and the arm never moves.
+_FALLBACK_QUIET_TICKS = 60            # ~3 s at 20 Hz — enough for BT to walk
+# Re-queue the fallback every N ticks of continued stall. The first
+# fallback gets swallowed sometimes; periodic re-queue guarantees
+# something eventually moves.
+_FALLBACK_REFIRE_EVERY = 80           # ~4 s at 20 Hz
+# Auto-abort the RLSweeper after this many consecutive stall ticks
+# — the policy is demonstrably broken; stopping the sweep restores
+# manual control immediately so the user doesn't have to press Z.
+_STALL_ABORT_THRESHOLD = 200          # ~10 s at 20 Hz
 # Threshold below which a commanded pose is treated as "no motion" even
 # if reachability/IK nominally succeeded. Matches the ~0.5° joint
 # quantisation noise floor.
@@ -174,8 +188,11 @@ class RLSweeper:
         self.policy_ref = policy_ref
 
         # Stall tracking (fix for deterministic-policy infinite-loop bug).
-        self._stall_count:  int  = 0
-        self.stall_warned:  bool = False   # surfaced in controller status
+        self._stall_count:       int  = 0
+        self.stall_warned:       bool = False   # surfaced in controller status
+        self.stall_aborted:      bool = False   # set when auto-abort fires
+        self._quiet_ticks_left:  int  = 0       # skip _send_move while > 0
+        self._last_fallback_tick: int = -10_000 # last tick the fallback fired
 
         self.tick_hz = float(tick_hz)
 
@@ -447,7 +464,21 @@ class RLSweeper:
                 abs(new_r     - arm_snap['r']),
                 abs(new_z     - arm_snap['z']),
             )
-            sent_ok = self._send_move(new_theta, new_r, new_z)
+
+            # Quiet-ticks window: while the BT is executing a fallback
+            # manual intent, SKIP the sweeper's own command dispatch so
+            # the two paths don't race on the serial bridge. Without
+            # this the RLSweeper's per-tick near-zero-motion SET ALLs
+            # overwrite the BT's EMA-smoothed manual-intent moves and
+            # the arm never actually executes the fallback. Stall count
+            # still advances during the quiet window so abort can fire
+            # if the BT itself fails to produce motion.
+            if self._quiet_ticks_left > 0:
+                self._quiet_ticks_left -= 1
+                sent_ok = False         # suppressed on purpose
+            else:
+                sent_ok = self._send_move(new_theta, new_r, new_z)
+
             is_stall = (not sent_ok) or (move_eps < _NO_MOTION_EPS)
 
             if is_stall:
@@ -457,20 +488,49 @@ class RLSweeper:
                         or self._stall_count % _STALL_LOG_EVERY_N == 0):
                     log.warning(
                         "RLSweeper stalled %d consecutive ticks "
-                        "(policy action unreachable or zero) — "
-                        "safety-BT fallback will engage at %d",
+                        "(policy action unreachable or zero). "
+                        "Fallback=%d  abort=%d",
                         self._stall_count, _STALL_THRESHOLD,
+                        _STALL_ABORT_THRESHOLD,
                     )
                     self.stall_warned = True
-                # Escalate to the safety BT's cascading replanner after
-                # the threshold. (Fix B.) The BT picks a detour around
-                # any known obstacles and walks the arm there; its
-                # manual-intent mode returns to idle once achieved, so
-                # the policy resumes on the next tick from a new pose
-                # — breaking the deterministic stall.
-                if (self._stall_count == _STALL_THRESHOLD
-                        and self._safety_api is not None):
-                    self._dispatch_stall_fallback(arm_snap)
+
+                # Escalate to the safety-BT cascading replanner. Fire
+                # at the initial threshold AND re-fire periodically
+                # while the stall persists. A single queued manual
+                # intent is sometimes silently dropped by the BT (e.g.,
+                # its manual branch refused the plan). Periodic re-fire
+                # guarantees we keep trying.
+                if self._safety_api is not None:
+                    ticks_since_last_fallback = (
+                        self._stall_count - self._last_fallback_tick
+                    )
+                    should_fire = (
+                        self._stall_count == _STALL_THRESHOLD
+                        or (self._stall_count > _STALL_THRESHOLD
+                            and ticks_since_last_fallback >= _FALLBACK_REFIRE_EVERY)
+                    )
+                    if should_fire:
+                        self._dispatch_stall_fallback(arm_snap)
+                        self._last_fallback_tick = self._stall_count
+                        self._quiet_ticks_left   = _FALLBACK_QUIET_TICKS
+
+                # Auto-abort: the policy is demonstrably broken and
+                # even the BT fallback isn't moving the arm. Stop the
+                # sweeper so the user gets manual control back without
+                # having to press Z through a frozen UI.
+                if self._stall_count >= _STALL_ABORT_THRESHOLD:
+                    log.error(
+                        "RLSweeper AUTO-ABORTING after %d stalled ticks "
+                        "(~%.1f s). Policy is not producing motion and "
+                        "the safety-BT fallback failed to recover. "
+                        "Stopping sweeper so manual control is restored.",
+                        self._stall_count,
+                        self._stall_count / float(self.tick_hz),
+                    )
+                    self.stall_aborted = True
+                    self._stop.set()
+                    break
             else:
                 if self._stall_count >= _STALL_LOG_FIRST:
                     log.info("RLSweeper recovered after %d stalled ticks",

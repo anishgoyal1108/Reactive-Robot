@@ -227,10 +227,12 @@ class BraccioController:
         # RL deployment (optional — only active when --rl-policy is passed)
         self._rl_policy_path = rl_policy_path
         self._rl_sweeper = None          # built lazily in _curses_main
-        # Set to True after the RLSweeper auto-aborts; Z then routes to the
-        # classical BT sweep instead of restarting the broken RL policy.
-        # The user can still re-enable RL by restarting the controller.
-        self._rl_aborted_this_session = False
+        # Timestamp of last time the arm's θ actually changed — used to
+        # decide whether repeated Z presses after an RL abort should
+        # retry RL (arm is moving, maybe just a transient stall) or
+        # fall through to the classical BT sweep (arm genuinely stuck).
+        self._last_theta_motion_ts = 0.0
+        self._last_observed_theta  = None
 
         # Naïve demo sweep — bypasses BT + policy, just oscillates θ at
         # the hardware level with IR-bits emergency stop. Wakes up on
@@ -426,10 +428,15 @@ class BraccioController:
                                                  "stall_warned", False))
                 sweeper_aborted = bool(getattr(self._rl_sweeper,
                                                  "stall_aborted", False))
-            # Latch session-wide abort flag once (this also gets set in
-            # sweep_toggle when the user hits Z after an abort).
-            if sweeper_aborted and not self._rl_aborted_this_session:
-                self._rl_aborted_this_session = True
+            # Track arm motion: if θ stopped changing, the sweep handler
+            # uses this to decide when to fall through to the classical
+            # BT sweep instead of keeping retries on a stuck RL policy.
+            import time as _t
+            _cur_theta = float(self._state.theta)
+            if (self._last_observed_theta is None
+                    or abs(_cur_theta - self._last_observed_theta) > 0.5):
+                self._last_theta_motion_ts = _t.monotonic()
+                self._last_observed_theta  = _cur_theta
             with self._state._lock:
                 # Only write to last_error if there's an ACTIVE problem.
                 # The session-wide abort flag is informational and does
@@ -799,57 +806,67 @@ class BraccioController:
             return
         # ── Autonomous sweep ──────────────────────────────────────────────
         if action == "sweep_toggle":
-            # Check if the RL sweeper was auto-aborted this session — if so,
-            # Z now routes to the classical BT sweep instead of restarting
-            # the broken RL policy. The user explicitly has to restart the
-            # controller to re-enable RL.
-            rl_available = (
-                self._rl_sweeper is not None
-                and not self._rl_aborted_this_session
-                and not getattr(self._rl_sweeper, "stall_aborted", False)
-            )
-            # Also latch stall_aborted → session-wide flag so RL stays off
-            # even if the user toggles through other sweep modes.
-            if (self._rl_sweeper is not None
-                    and getattr(self._rl_sweeper, "stall_aborted", False)):
-                self._rl_aborted_this_session = True
+            # Per-press decision tree. No session-wide latches — each Z
+            # press starts fresh so the user can always retry RL or
+            # cleanly escape to BT sweep.
+            import time as _t
+            sw = self._rl_sweeper
+            rl_loaded = sw is not None
 
-            if rl_available:
-                if self._rl_sweeper.running():
-                    self._rl_sweeper.stop()
-                    with self._state._lock:
-                        self._state.last_resp = "RL sweep stopped"
-                        self._state.last_error = ""
-                else:
-                    try:
-                        self._safety.stop_sweep()
-                    except Exception:
-                        pass
-                    self._rl_sweeper.start()
-                    with self._state._lock:
-                        self._state.last_resp = "RL sweep started"
-                        self._state.last_error = ""
-            else:
-                # Fallback: classical BT sweep. Either no RL policy loaded,
-                # or RL auto-aborted earlier in this session.
-                if self._rl_sweeper is not None:   # log the reason once
-                    with self._state._lock:
-                        if self._rl_aborted_this_session:
-                            self._state.last_resp = (
-                                "RL disabled (auto-aborted). "
-                                "Using classical BT sweep."
-                            )
-                safety_snap = self._safety.snapshot()
-                if safety_snap.get("mode") == "sweep":
+            # If RL sweep is currently running: Z stops it.
+            if rl_loaded and sw.running():
+                sw.stop()
+                with self._state._lock:
+                    self._state.last_resp = "RL sweep stopped"
+                    self._state.last_error = ""
+                return
+
+            # If BT sweep is currently running: Z stops it.
+            safety_snap = self._safety.snapshot()
+            if safety_snap.get("mode") == "sweep":
+                self._safety.stop_sweep()
+                with self._state._lock:
+                    self._state.last_resp = "BT sweep stopped"
+                    self._state.last_error = ""
+                return
+
+            # Nothing running → decide which sweep to start.
+            # If the arm hasn't moved in > 5 s AND RL is previously
+            # aborted, route to BT sweep (RL is demonstrably broken for
+            # this pose). Otherwise retry RL with a fresh state
+            # machine so the user can iterate without restarting.
+            stuck_s = _t.monotonic() - self._last_theta_motion_ts
+            rl_was_aborted = rl_loaded and bool(getattr(sw, "stall_aborted", False))
+            prefer_bt = rl_was_aborted and stuck_s > 5.0
+
+            if rl_loaded and not prefer_bt:
+                # Fresh RL retry — reset the sweeper's abort state.
+                if getattr(sw, "stall_aborted", False):
+                    sw.stall_aborted = False
+                    sw.stall_warned  = False
+                    sw._stall_count  = 0
+                try:
                     self._safety.stop_sweep()
-                    with self._state._lock:
-                        self._state.last_resp = "BT sweep stopped"
-                        self._state.last_error = ""
-                else:
-                    self._safety.start_sweep()
-                    with self._state._lock:
-                        self._state.last_resp = "BT sweep started"
-                        self._state.last_error = ""
+                except Exception:
+                    pass
+                sw.start()
+                with self._state._lock:
+                    self._state.last_resp = (
+                        "RL sweep started (retry)" if rl_was_aborted
+                        else "RL sweep started"
+                    )
+                    self._state.last_error = ""
+            else:
+                # Either no RL loaded, or RL has been aborted AND the
+                # arm is stuck. Fall through to classical BT sweep.
+                self._safety.start_sweep()
+                with self._state._lock:
+                    reason = (
+                        " (RL was aborted and arm hasn't moved)"
+                        if rl_was_aborted else ""
+                    )
+                    self._state.last_resp = f"BT sweep started{reason}"
+                    self._state.last_error = ""
             return
 
         # ── Naïve demo sweep (N key — bypasses BT + policy entirely) ──────

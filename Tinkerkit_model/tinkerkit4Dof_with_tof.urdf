@@ -1,0 +1,166 @@
+<?xml version="1.0"?>
+<robot name="visual">
+
+  <material name="gray">
+    <color rgba="0.3 0.3 0.3 1"/>
+  </material>
+  <material name="orange">
+    <color rgba="0.8 0.084 0 1"/>
+  </material>
+  <material name="white">
+    <color rgba="0.8 0.8 0.8 1"/>
+  </material>
+
+  <link name="base_link">
+    <visual>
+      <geometry>
+        <box size="0.15 0.15 .05"/>
+      </geometry>
+      <material name="gray"/> 
+      <origin rpy="0 0 0" xyz="0 0 -0.025"/>
+    </visual>
+  </link>
+
+  <link name="link1">
+    <visual>
+      <geometry>
+        <mesh filename="./base.stl"/>
+      </geometry>
+      <material name="orange"/> 
+    </visual>
+  </link>
+
+    <link name="link2">
+    <visual>
+      <geometry>
+        <mesh filename="./shoulder.stl"/>
+      </geometry>
+      <material name="orange"/>
+      <origin rpy="0 0 0" xyz="0 0 -0.0505"/> 
+    </visual>
+  </link>
+
+    <link name="link3">
+    <visual>
+      <geometry>
+        <mesh filename="./elbow.stl"/>
+      </geometry>
+      <material name="orange"/>
+      <origin rpy="0 0 0" xyz="0 0 -0.1705"/> 
+    </visual>
+  </link>
+
+    <link name="link4">
+    <visual>
+      <geometry>
+        <mesh filename="./wrist_pitch.stl"/>
+      </geometry>
+      <material name="orange"/>
+      <origin rpy="0 0 0" xyz="0 0 -0.2905"/> 
+    </visual>
+  </link>
+
+
+  <material name="tof_blue">
+    <color rgba="0.15 0.45 0.95 1"/>
+  </material>
+
+  <link name="tof_ch0_link">
+    <visual>
+      <geometry>
+        <box size="0.018 0.018 0.006"/>
+      </geometry>
+      <material name="tof_blue"/>
+    </visual>
+  </link>
+
+  <link name="tof_ch1_link">
+    <visual>
+      <geometry>
+        <box size="0.018 0.018 0.006"/>
+      </geometry>
+      <material name="tof_blue"/>
+    </visual>
+  </link>
+
+  <link name="tof_ch2_link">
+    <visual>
+      <geometry>
+        <box size="0.018 0.018 0.006"/>
+      </geometry>
+      <material name="tof_blue"/>
+    </visual>
+  </link>
+
+  <link name="tof_ch3_link">
+    <visual>
+      <geometry>
+        <box size="0.018 0.018 0.006"/>
+      </geometry>
+      <material name="tof_blue"/>
+    </visual>
+  </link>
+
+  <joint name="base" type="revolute">
+    <axis xyz="0 0 -1"/>
+    <limit effort="1000.0" lower="0.0" upper="3.141592653589793" velocity="4.0"/>
+    <origin rpy="0 0 0" xyz="0 0 0"/>
+    <parent link="base_link"/>
+    <child link="link1"/>
+  </joint>
+
+  <joint name="shoulder" type="revolute">
+    <axis xyz="1 0 0"/>
+    <limit effort="1000.0" lower="0.2617993877991494" upper="2.8797932657906435" velocity="4.0"/>
+    <origin rpy="-1.5707963267948966 0 0" xyz="0 0 0.0505"/>   
+    <parent link="link1"/>
+    <child link="link2"/>
+  </joint>
+
+   <joint name="elbow" type="revolute">
+    <axis xyz="1 0 0"/>
+    <limit effort="1000.0" lower="0" upper="3.141592653589793" velocity="4.0"/>
+    <origin rpy="-1.5707963267948966 0 0" xyz="0 0 0.1205"/>
+    <parent link="link2"/>
+    <child link="link3"/>
+  </joint>
+
+    <joint name="wrist_pitch" type="revolute">
+    <axis xyz="1 0 0"/>
+    <limit effort="1000.0" lower="0" upper="3.141592653589793" velocity="4.0"/>
+    <origin rpy="-1.5707963267948966 0 0" xyz="0 0 0.1205"/>
+    <parent link="link3"/>
+    <child link="link4"/>
+  </joint>
+
+
+
+  <!-- ToF sensors mounted around the wrist-pitch body (link4).
+       Reference condition: arm at HOME, theta = 90, arm pointing straight up.
+       When an observer looks down at the arm with the gripper pointing toward them:
+       CH0 boresight -> -Y, CH1 boresight -> +Y, CH2 boresight -> -X, CH3 boresight -> +X. -->
+  <joint name="tof_ch0_joint" type="fixed">
+    <parent link="link4"/>
+    <child link="tof_ch0_link"/>
+    <origin xyz="0.055 0.000 0.000" rpy="0 0 0"/>
+  </joint>
+
+  <joint name="tof_ch1_joint" type="fixed">
+    <parent link="link4"/>
+    <child link="tof_ch1_link"/>
+    <origin xyz="-0.055 0.000 0.000" rpy="0 0 3.14159265359"/>
+  </joint>
+
+  <joint name="tof_ch2_joint" type="fixed">
+    <parent link="link4"/>
+    <child link="tof_ch2_link"/>
+    <origin xyz="0.000 -0.055 0.000" rpy="0 0 -1.57079632679"/>
+  </joint>
+
+  <joint name="tof_ch3_joint" type="fixed">
+    <parent link="link4"/>
+    <child link="tof_ch3_link"/>
+    <origin xyz="0.000 0.055 0.000" rpy="0 0 1.57079632679"/>
+  </joint>
+
+</robot>

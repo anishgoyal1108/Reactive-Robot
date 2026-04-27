@@ -6,11 +6,7 @@ import numpy as np
 from serial import Serial
 from serial.tools import list_ports
 
-"""
-
-Barebones as possible console viewer for VL53L5CX 8x8 frames from Teensy.
-
-"""
+"""Barebones console viewer for VL53L5CX frames from Teensy."""
 
 
 def pick_port(user_port):
@@ -26,40 +22,77 @@ def pick_port(user_port):
 
 def parse_frame(line):
     """
-    Expected:
-      FRAME,ch,activeFlag,hz,res,d0,d1,...,d63, defined by Teensy code in the .ino file.
-    Returns (ch:int, grid:np.ndarray 8x8) or None.
+    Accepts either:
+      FRAME,ch,activeFlag,hz,res,d0,d1,...,d63
+    or
+      TF,seq,mcu_ms,sensor_id,mux_ch,joint_id,status,rows,cols,d...,v...
+
+    Returns (ch:int, grid:np.ndarray, valid:np.ndarray) or None.
     """
-    if not line.startswith("FRAME,"):
-        return None
     parts = line.strip().split(",")
-    if len(parts) < 6:
+    if not parts:
         return None
+
     try:
-        ch = int(parts[1])
-        res = int(parts[4])
-        if ch not in (0, 1) or res != 64:
-            return None
-        data = parts[5:5 + 64]
-        if len(data) != 64:
-            return None
-        vals = np.array([int(x) for x in data], dtype=np.int32).reshape((8, 8))
-        return ch, vals
+        if parts[0] == "FRAME":
+            if len(parts) < 6:
+                return None
+            ch = int(parts[1])
+            res = int(parts[4])
+            side = int(round(float(res) ** 0.5))
+            if ch not in (0, 1, 2, 3) or side * side != res:
+                return None
+            data = parts[5 : 5 + res]
+            vals = np.array([int(float(x)) for x in data], dtype=np.int32).reshape((side, side))
+            valid = np.ones((side, side), dtype=np.uint8)
+            return ch, vals, valid
+
+        if parts[0] == "TF":
+            if len(parts) < 9:
+                return None
+            ch = int(parts[4])
+            if ch not in (0, 1, 2, 3):
+                return None
+            rows = int(parts[7])
+            cols = int(parts[8])
+            count = rows * cols
+            if rows <= 0 or cols <= 0 or len(parts) != 9 + count + count:
+                return None
+            vals = np.array([int(float(x)) for x in parts[9 : 9 + count]], dtype=np.int32).reshape((rows, cols))
+            valid = np.array([int(x) for x in parts[9 + count : 9 + count + count]], dtype=np.uint8).reshape((rows, cols))
+            return ch, vals, valid
     except Exception:
         return None
 
-def fmt_grid(g):
+    return None
+
+def fmt_grid(g, valid):
     """
-    Returns list[str] of 8 lines representing an 8x8 grid.
+    Returns list[str] representing a grid.
 
     """
-    # fixed width per cell (4 chars) keeps columns aligned up to 9999 mm
-    # if you expect >9999, bump width to 5.
     cell_w = 4
     lines = []
-    for r in range(8):
-        row = " ".join(f"{int(g[r, c]):{cell_w}d}" for c in range(8))
+    rows, cols = g.shape
+    header = "     " + " ".join(f"c{c:02d}"[-cell_w:] for c in range(cols))
+    lines.append(header)
+    for r in range(rows):
+        cells = []
+        for c in range(cols):
+            if int(valid[r, c]) == 0 or int(g[r, c]) < 0:
+                cells.append(f"{'--':>{cell_w}s}")
+            else:
+                cells.append(f"{int(g[r, c]):{cell_w}d}")
+        row = f"r{r}: " + " ".join(cells)
         lines.append(row)
+    return lines
+
+
+def fmt_coord_map(rows, cols):
+    lines = ["     " + " ".join(f"c{c:>2d}" for c in range(cols))]
+    for r in range(rows):
+        row = " ".join(f"{r},{c}" for c in range(cols))
+        lines.append(f"r{r}: {row}")
     return lines
 
 def clear_console():
@@ -75,7 +108,7 @@ def main():
     Making this was hell
     
     """
-    ap = argparse.ArgumentParser(description="Console 8x8 grids for VL53L5CX CH0/CH1 (MUX only).")
+    ap = argparse.ArgumentParser(description="Console grid viewer for VL53L5CX CH0..CH3.")
     ap.add_argument("--port", default=None, help="Serial port (or set env VL5_PORT).")
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--fps", type=float, default=10.0, help="Console refresh rate (Hz).")
@@ -92,9 +125,10 @@ def main():
     time.sleep(0.3)
 
     # last grids + timestamps + frame counts
-    grids = [np.full((8, 8), -1, dtype=np.int32), np.full((8, 8), -1, dtype=np.int32)]
-    last_rx = [0.0, 0.0]
-    frames = [0, 0]
+    grids = [np.full((4, 4), -1, dtype=np.int32) for _ in range(4)]
+    valid = [np.zeros((4, 4), dtype=np.uint8) for _ in range(4)]
+    last_rx = [0.0, 0.0, 0.0, 0.0]
+    frames = [0, 0, 0, 0]
 
     # target refresh timing
     period = 1.0 / max(1e-6, args.fps)
@@ -108,8 +142,9 @@ def main():
                 out = parse_frame(line)
                 if out is None:
                     continue
-                ch, g = out
+                ch, g, v = out
                 grids[ch] = g
+                valid[ch] = v
                 last_rx[ch] = time.time()
                 frames[ch] += 1
 
@@ -119,24 +154,28 @@ def main():
 
                 # render
                 clear_console()
-                age0 = now - last_rx[0] if last_rx[0] else 1e9
-                age1 = now - last_rx[1] if last_rx[1] else 1e9
-
-                header = (
-                    f"VL53L5CX Console Viewer (MUX) | "
-                    f"CH0 frames={frames[0]} age={age0:0.2f}s | "
-                    f"CH1 frames={frames[1]} age={age1:0.2f}s"
-                )
+                header = "VL53L5CX Console Viewer (MUX)"
                 print(header)
                 print("-" * len(header))
 
-                left = fmt_grid(grids[0])
-                right = fmt_grid(grids[1])
+                for ch in range(4):
+                    age = now - last_rx[ch] if last_rx[ch] else 1e9
+                    g = grids[ch]
+                    v = valid[ch]
+                    rows, cols = g.shape
+                    print(f"\nCH{ch} | frames={frames[ch]} age={age:0.2f}s | grid={rows}x{cols}")
+                    for line in fmt_grid(g, v):
+                        print(line)
+                    print("Coordinates:")
+                    for line in fmt_coord_map(rows, cols):
+                        print(line)
 
-                print("CH0".ljust(4 + 8 * 5) + "    " + "CH1")
-                for r in range(8):
-                    print(left[r] + "    " + right[r])
-
+                print("\nOrientation reference:")
+                print("  top of display = sensor row r0")
+                print("  bottom of display = sensor last row")
+                print("  left of display = sensor column c0")
+                print("  right of display = sensor last column")
+                print("  '--' means invalid / filtered zone")
                 print("\n(CTRL+C to quit)")
 
             time.sleep(0.005)

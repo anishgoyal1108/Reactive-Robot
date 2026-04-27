@@ -1,158 +1,188 @@
-"""
-constants.py — All configuration values in one place.
+"""Configuration constants for Braccio host control."""
 
-Edit link lengths here if your Braccio build differs from the standard:
-  L1 = shoulder pivot (M2) → elbow pivot (M3)
-  L2 = elbow pivot   (M3) → wrist pivot (M4)
-  L3 = wrist pivot   (M4) → gripper tip
-"""
+from __future__ import annotations
 
-# ── Link lengths (mm) ─────────────────────────────────────────────────────
+# Link lengths (mm)
 L1 = 125.0
 L2 = 125.0
 L3 = 60.0
 
-# ── Joint indices ─────────────────────────────────────────────────────────
-JOINT_BASE       = 0
-JOINT_SHOULDER   = 1
-JOINT_ELBOW      = 2
+# Joint indices
+JOINT_BASE = 0
+JOINT_SHOULDER = 1
+JOINT_ELBOW = 2
 JOINT_WRIST_VERT = 3
-JOINT_WRIST_ROT  = 4
-JOINT_GRIPPER    = 5
+JOINT_WRIST_ROT = 4
+JOINT_GRIPPER = 5
 
-# ── Joint limits: (min_deg, max_deg) ─────────────────────────────────────
+# Joint limits (deg)
 JOINT_LIMITS = [
-    (0,   180),   # Base
-    (15,  165),   # Shoulder
-    (0,   180),   # Elbow
-    (0,   180),   # Wrist Vertical
-    (0,   180),   # Wrist Rotation
-    (10,   73),   # Gripper
+    (0, 180),
+    (15, 165),
+    (0, 180),
+    (0, 180),
+    (0, 180),
+    (10, 73),
 ]
 
-# ── Protocol tokens (must match Arduino's JOINT_TOKEN[]) ──────────────────
-JOINT_TOKENS = ['B', 'S', 'E', 'WV', 'WR', 'G']
+JOINT_TOKENS = ["B", "S", "E", "WV", "WR", "G"]
+JOINT_NAMES = ["Base  ", "Shoulder", "Elbow   ", "WristV  ", "WristR  ", "Gripper "]
 
-# ── Joint display names ───────────────────────────────────────────────────
-JOINT_NAMES = ['Base  ', 'Shoulder', 'Elbow   ', 'WristV  ', 'WristR  ', 'Gripper ']
-
-# ── Home / equilibrium position (deg) ────────────────────────────────────
 HOME_POS = [90, 90, 90, 90, 90, 73]
 
-# ── Serial config ─────────────────────────────────────────────────────────
-DEFAULT_PORT    = '/dev/ttyACM0'
-BAUD_RATE       = 115200
-SERIAL_TIMEOUT  = 0.1   # seconds for readline timeout
+# Serial config
+DEFAULT_PORT = "/dev/ttyACM0"
+BAUD_RATE = 115200
+SERIAL_TIMEOUT = 0.1
+MEGA_PROTOCOL_V1 = True
+MEGA_CMD_TIMEOUT_MS = 750
+MEGA_HEARTBEAT_MS = 250
 
-# ── Default IK state ──────────────────────────────────────────────────────
-DEFAULT_THETA = 90.0    # degrees (arm pointing straight forward)
-DEFAULT_R     = 152.0   # mm (~6 inches)
-DEFAULT_Z     = -50.0   # mm below shoulder pivot
+# Default IK/polar state
+DEFAULT_THETA = 90.0
+DEFAULT_R = 152.0
+DEFAULT_Z = 20.0
 
-# ── IK reach limits ───────────────────────────────────────────────────────
+# Reach limits
 R_MIN = 10.0
-R_MAX = 240.0   # L1 + L2 - L3 = 190mm effective, but allow up to full extension
-Z_MIN = -250.0
+R_MAX = 240.0
+Z_MIN = 0.0
 Z_MAX = 200.0
 
-# ── Keyboard step sizes ───────────────────────────────────────────────────
-THETA_STEP   =  5.0   # deg per keypress
-R_STEP       = 10.0   # mm per keypress
-Z_STEP       = 10.0   # mm per keypress
-WRIST_V_STEP =  5.0   # deg per keypress (wrist offset)
-WRIST_R_STEP =  5.0   # deg per keypress (wrist rotation)
+# Keyboard step sizes
+THETA_STEP = 5.0
+R_STEP = 10.0
+Z_STEP = 10.0
+WRIST_V_STEP = 5.0
+WRIST_R_STEP = 5.0
 
-# ── Gripper positions ─────────────────────────────────────────────────────
-GRIPPER_OPEN  = 10    # fully open
-GRIPPER_CLOSE = 73    # fully closed
-GRIPPER_GENTLE = 55   # gentle grip (won't crush a pen)
+# Gripper
+GRIPPER_OPEN = 10
+GRIPPER_CLOSE = 73
+GRIPPER_GENTLE = 55
 
-# ── Slew rate constraints (deg/tick at 100 Hz) ────────────────────────────
-DELTA_MIN     = 1
-DELTA_MAX     = 5
+# Slew rate
+DELTA_MIN = 1
+DELTA_MAX = 5
 DELTA_DEFAULT = 1
 
-# ── Plotter ───────────────────────────────────────────────────────────────
+# Runtime efficiency targets
+CONTROL_LOOP_HZ = 25.0
+DISPLAY_LOOP_HZ = 8.0
+
+# Side-to-side obstacle test profile defaults (integrated into main UI)
+PROFILE_SWEEP_R_MM = 112.0
+PROFILE_SWEEP_Z_MM = 20.0
+PROFILE_SWEEP_WRIST_OFFSET_DEG = 0.0
+PROFILE_SWEEP_WRIST_ROT_DEG = 90
+PROFILE_SWEEP_GRIPPER_DEG = 73
+PROFILE_SWEEP_STEP_DEG = 1.5
+PROFILE_SWEEP_DWELL_S = 0.8
+PROFILE_SWEEP_THETA_MIN_DEG = 5.0
+PROFILE_SWEEP_THETA_MAX_DEG = 175.0
+
+# Plotter (kept for optional use)
 JOINT_COLORS = [
-    'tab:blue',   # Base
-    'tab:orange', # Shoulder
-    'tab:green',  # Elbow
-    'tab:red',    # Wrist Vertical
-    'tab:purple', # Wrist Rotation
-    'tab:brown',  # Gripper
+    "tab:blue",
+    "tab:orange",
+    "tab:green",
+    "tab:red",
+    "tab:purple",
+    "tab:brown",
 ]
-PLOT_WINDOW_S  = 60.0   # seconds of history visible at once (scrolling window)
-PLOT_SAMPLE_HZ = 20.0   # sampler thread rate (Hz)
-PLOT_UPDATE_HZ = 10.0   # FuncAnimation redraw rate (Hz)
-PLOT_KEY_RESET      = 'u'   # reset plot & restart t=0
-PLOT_KEY_SCREENSHOT = 'y'   # save PNG screenshot
-PLOT_KEY_LOG        = 't'   # toggle CSV logging
-PLOT_KEY_MAIN_TOGGLE = '0'  # hide/show main combined window
-# keys '1'–'6' toggle individual per-joint pop-out windows (hardcoded in plotter)
-PLOT_Y_MARGIN_DEG   = 10    # extra degrees above/below joint limits on y-axis
-LOG_DIR        = 'logs'
-SCREENSHOT_DIR = 'screenshots'
+PLOT_WINDOW_S = 60.0
+PLOT_SAMPLE_HZ = 20.0
+PLOT_UPDATE_HZ = 10.0
+PLOT_KEY_RESET = "u"
+PLOT_KEY_SCREENSHOT = "y"
+PLOT_KEY_LOG = "t"
+PLOT_KEY_MAIN_TOGGLE = "0"
+PLOT_Y_MARGIN_DEG = 10
+LOG_DIR = "logs"
+SCREENSHOT_DIR = "screenshots"
 
-# ── ToF sensor settings ──────────────────────────────────────────────────
-TOF_NUM_CHANNELS    = 4        # number of VL53L5CX sensors on MUX
-TOF_DEFAULT_PORT    = '/dev/ttyACM1'   # Teensy port (separate from Braccio)
-TOF_BAUD_RATE       = 115200
-TOF_THRESHOLD_MM    = 300.0    # default obstacle detection threshold (mm)
-TOF_UPSAMPLE_N     = 40       # bilinear upsample resolution for plotting
-TOF_SURFACE_EVERY  = 5        # redraw 3D surface every N frames (performance)
-TOF_PLOT_INTERVAL_MS = 100    # animation timer interval
-TOF_MAX_RANGE_MM   = 3000.0   # max display range for heatmap colorbar
+# ToF settings
+# Runtime defaults to the 4-sensor Hyperion sketch. The host switches the
+# Teensy between ACT 2 during normal detection and ACT 4 during confirmation
+# / avoidance tracking.
+TOF_NUM_CHANNELS = 4
+TOF_CHANNELS_DEFAULT = 4
+TOF_CHANNELS_STANDARD_MAX = 2
+TOF_CHANNELS_HYPERION_DEFAULT = 4
+TOF_CHANNELS_MAX = 4
+TOF_DEFAULT_PORT = "/dev/ttyACM1"
+TOF_BAUD_RATE = 115200
+TOF_THRESHOLD_MM = 250.0
+TOF_FRESHNESS_S = 0.4
+OBSTACLE_DECAY_S_DEFAULT = 5.0
+TOF_UPSAMPLE_N = 40
+TOF_SURFACE_EVERY = 5
+TOF_PLOT_INTERVAL_MS = 100
+TOF_MAX_RANGE_MM = 3000.0
 
-# ── IR sensor settings (OUT1D, 2-bit) ───────────────────────────────────
-# Bits: 00=CLEAR  01=FAR  10=CLOSE  11=DANGER
-IR_LABEL_MAP = {0: 'CLEAR', 1: 'FAR', 2: 'CLOSE', 3: 'DANGER'}
+OBSTACLE_CONFIRMATION_HITS = 3
+OBSTACLE_CONFIRMATION_FRAMES = 5
+OBSTACLE_CANDIDATE_TIMEOUT_S = 1.0
+OBSTACLE_TRACK_GATE_MM = 90.0
+OBSTACLE_TRACK_MAX_MISSES = 5
+OBSTACLE_TRACK_ALPHA = 0.45
+OBSTACLE_TRACK_DISAGREE_MM = 140.0
+Z_SCAN_STEP_MM = 20.0
+Z_SCAN_MAX_STEPS = 8
+Z_SCAN_CLEARANCE_SCALE = 1.2
+OPTIMIZER_STUCK_CYCLES = 6
+OPTIMIZER_PROGRESS_EPS = 0.35
 
-# ── Key bindings: curses key code → action string ─────────────────────────
-# fmt: off
+# IR mapping
+IR_LABEL_MAP = {0: "CLEAR", 1: "FAR", 2: "CLOSE", 3: "DANGER"}
+
+# Key bindings
 KEY_BINDINGS = {
-    ord('a'): 'theta_dec',    ord('A'): 'theta_dec',
-    ord('d'): 'theta_inc',    ord('D'): 'theta_inc',
-    ord('w'): 'r_inc',        ord('W'): 'r_inc',
-    ord('s'): 'r_dec',        ord('S'): 'r_dec',
-    ord('q'): 'z_inc',        ord('Q'): 'z_inc',
-    ord('e'): 'z_dec',        ord('E'): 'z_dec',
-    ord('i'): 'wv_inc',       ord('I'): 'wv_inc',
-    ord('k'): 'wv_dec',       ord('K'): 'wv_dec',
-    ord('j'): 'wr_dec',       ord('J'): 'wr_dec',
-    ord('l'): 'wr_inc',       ord('L'): 'wr_inc',
-    ord('o'): 'grip_open',    ord('O'): 'grip_open',
-    ord('['): 'grip_open',
-    ord('p'): 'grip_close',   ord('P'): 'grip_close',
-    ord(']'): 'grip_close',
-    ord('+'): 'delta_inc',    ord('='): 'delta_inc',
-    ord('-'): 'delta_dec',    ord('_'): 'delta_dec',
-    ord('h'): 'go_home',
-    ord('H'): 'set_equil',    # Shift+H
-    ord('m'): 'states_menu',  # States menu
-    ord('M'): 'states_menu',
-    ord('x'): 'seq_editor',   # Sequence editor
-    ord('X'): 'seq_editor',
-    ord('0'): 'plot_main_toggle',
-    ord('1'): 'plot_joint_1_toggle',
-    ord('2'): 'plot_joint_2_toggle',
-    ord('3'): 'plot_joint_3_toggle',
-    ord('4'): 'plot_joint_4_toggle',
-    ord('5'): 'plot_joint_5_toggle',
-    ord('6'): 'plot_joint_6_toggle',
-    ord('7'): 'plot_reset',
-    ord('8'): 'plot_screenshot',
-    ord('9'): 'plot_log_toggle',
-    # ── ToF / IR sensor controls ─────────────────────────────────────────
-    ord('v'): 'tof_view_toggle',       # V: Toggle ToF 4-channel surface viewer
-    ord('V'): 'tof_view_toggle',
-    ord('b'): 'tof_export_csv',        # B: Export current ToF grids to CSV
-    ord('B'): 'tof_export_csv',
-    ord('n'): 'tof_screenshot',        # N: Screenshot ToF plots
-    ord('N'): 'tof_screenshot',
-    ord('g'): 'tof_log_toggle',        # G: Toggle ToF CSV streaming log
-    ord('G'): 'tof_log_toggle',
-    ord('f'): 'tof_threshold_inc',     # F: Increase ToF threshold +50mm
-    ord('F'): 'tof_threshold_dec',     # Shift+F: Decrease ToF threshold -50mm
-    27:       'quit',          # ESC
+    ord("a"): "theta_dec", ord("A"): "theta_dec",
+    ord("d"): "theta_inc", ord("D"): "theta_inc",
+    ord("w"): "r_inc", ord("W"): "r_inc",
+    ord("s"): "r_dec", ord("S"): "r_dec",
+    ord("q"): "z_inc", ord("Q"): "z_inc",
+    ord("e"): "z_dec", ord("E"): "z_dec",
+    ord("i"): "wv_inc", ord("I"): "wv_inc",
+    ord("k"): "wv_dec", ord("K"): "wv_dec",
+    ord("j"): "wr_dec", ord("J"): "wr_dec",
+    ord("l"): "wr_inc", ord("L"): "wr_inc",
+    ord("o"): "grip_open", ord("O"): "grip_open",
+    ord("["): "grip_open",
+    ord("p"): "grip_close", ord("P"): "grip_close",
+    ord("]"): "grip_close",
+    ord("+"): "delta_inc", ord("="): "delta_inc",
+    ord("-"): "delta_dec", ord("_"): "delta_dec",
+    ord("h"): "go_home",
+    ord("H"): "set_equil",
+    # ToF/monitoring controls
+    ord("v"): "tof_view_toggle", ord("V"): "tof_view_toggle",
+    ord("n"): "tof_screenshot", ord("N"): "tof_screenshot",
+    ord("f"): "tof_threshold_inc",
+    ord("F"): "tof_threshold_dec",
+
+    # Main runtime controls
+    ord("b"): "record_toggle", ord("B"): "record_toggle",
+    ord("r"): "profile_side_toggle", ord("R"): "profile_side_toggle",
+    ord("c"): "imu_calibrate", ord("C"): "imu_calibrate",
+
+    27: "quit",  # ESC
 }
-# fmt: on
+
+# IMU filtering
+# Exponential LPF: y_k = alpha*x_k + (1-alpha)*y_{k-1}
+# Lower alpha => stronger smoothing.
+IMU_LPF_ALPHA_DEFAULT = 0.25
+
+# Obstacle memory behavior
+PERSISTENT_MEMORY_DEFAULT = False
+PERSISTENT_CLEAR_REQUIRED = 4
+
+# Future planning preview for committed waypoint visualization
+PLANNING_HORIZON_S = 5.0
+PLANNING_PREVIEW_DT_S = 0.2
+
+TIMING_LOG_PATH = "logs/end_to_end_timing.jsonl"
+
+

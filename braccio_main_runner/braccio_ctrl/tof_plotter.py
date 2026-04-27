@@ -314,7 +314,7 @@ class ToFPlotter:
         N   = self._upsample_n
 
         fig = plt.figure(figsize=(16, 8))
-        fig.suptitle('ToF Sensors — Live View (4 Channels)', fontsize=11)
+        fig.suptitle(f'ToF Sensors - Live View ({self._num_ch} Channels)', fontsize=11)
 
         self._ax_heat   = []
         self._ax_surf   = []
@@ -354,8 +354,8 @@ class ToFPlotter:
         )
 
         # Key hint
-        hint = ('[U] reset  [Y] screenshot  [T] log  [C] export CSV  '
-                '[0] toggle main  [1-4] pop-out  [+/-] threshold')
+        hint = (f'[U] reset  [Y] screenshot  [T] log  [C] export CSV  '
+                f'[0] toggle main  [1-{self._num_ch}] pop-out  [+/-] threshold')
         fig.text(0.5, 0.005, hint, ha='center', fontsize=6, color='#888888')
 
         fig.canvas.mpl_connect('key_press_event', self._on_key)
@@ -368,7 +368,7 @@ class ToFPlotter:
         init_z = np.zeros((N, N), dtype=np.float32)
 
         fig = plt.figure(figsize=(10, 4))
-        fig.suptitle(f'ToF CH{ch} — Heatmap + Surface', fontsize=10)
+        fig.suptitle(f'ToF CH{ch} - Heatmap + Surface', fontsize=10)
 
         ax_h = fig.add_subplot(1, 2, 1)
         im   = ax_h.imshow(init_z, origin='lower', aspect='equal',
@@ -572,8 +572,10 @@ class ToFPlotter:
             self.export_csv_snapshot()
         elif key == '0':
             self._toggle_main_window()
-        elif key in ('1', '2', '3', '4'):
-            self._toggle_ind_window(int(key) - 1)
+        elif key.isdigit():
+            idx = int(key) - 1
+            if 0 <= idx < self._num_ch:
+                self._toggle_ind_window(idx)
         elif key in ('+', '='):
             with self._state._lock:
                 self._state.tof_threshold_mm = min(
@@ -582,3 +584,5 @@ class ToFPlotter:
             with self._state._lock:
                 self._state.tof_threshold_mm = max(
                     50.0, self._state.tof_threshold_mm - 50.0)
+
+

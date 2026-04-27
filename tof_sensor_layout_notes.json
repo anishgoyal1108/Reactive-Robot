@@ -1,0 +1,103 @@
+{
+  "schema": "tof-layout-v1",
+  "saved_at": "2026-03-18T20:38:01",
+  "reference": "theta=90 default sweep pose, operator facing gripper",
+  "channels": {
+    "0": {
+      "label": "west",
+      "mount_angle_deg": 180.0,
+      "roll_deg": 0.0,
+      "radial_offset_m": 0.018,
+      "axial_offset_m": 0.0,
+      "origin_m": [
+        0.0,
+        -0.018,
+        2.2043642384652355e-18
+      ],
+      "axis_dir": [
+        0.0,
+        -1.0,
+        1.2246467991473532e-16
+      ],
+      "up_hint": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "fov_x_deg": 63.0,
+      "fov_y_deg": 63.0
+    },
+    "1": {
+      "label": "east",
+      "mount_angle_deg": 0.0,
+      "roll_deg": 0.0,
+      "radial_offset_m": 0.018,
+      "axial_offset_m": 0.0,
+      "origin_m": [
+        0.0,
+        0.018,
+        0.0
+      ],
+      "axis_dir": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "up_hint": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "fov_x_deg": 63.0,
+      "fov_y_deg": 63.0
+    },
+    "2": {
+      "label": "north",
+      "mount_angle_deg": 90.0,
+      "roll_deg": 0.0,
+      "radial_offset_m": 0.018,
+      "axial_offset_m": 0.0,
+      "origin_m": [
+        0.0,
+        1.1021821192326178e-18,
+        0.018
+      ],
+      "axis_dir": [
+        0.0,
+        6.123233995736766e-17,
+        1.0
+      ],
+      "up_hint": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "fov_x_deg": 63.0,
+      "fov_y_deg": 63.0
+    },
+    "3": {
+      "label": "south",
+      "mount_angle_deg": 270.0,
+      "roll_deg": 0.0,
+      "radial_offset_m": 0.018,
+      "axial_offset_m": 0.0,
+      "origin_m": [
+        0.0,
+        -3.3065463576978533e-18,
+        -0.018
+      ],
+      "axis_dir": [
+        0.0,
+        -1.8369701987210297e-16,
+        -1.0
+      ],
+      "up_hint": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "fov_x_deg": 63.0,
+      "fov_y_deg": 63.0
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "created_wall": 1773891371.6768475,
+  "voxel_m": 0.05,
+  "cell_count": 0,
+  "scan_requested_count": 1,
+  "scan_completed_count": 1,
+  "accepted_points": 0,
+  "masked_points": 0,
+  "rejected_points": 0,
+  "cells": []
+}

@@ -1,0 +1,44 @@
+{
+  "schema": "braccio_session_v2",
+  "start_wall": 1777030562.8395538,
+  "end_wall": 1777030594.61785,
+  "duration_s": 31.77829623222351,
+  "samples": 672,
+  "tof_channels_enabled": 4,
+  "detect_channel_count": 2,
+  "tracking_channel_count": 4,
+  "detect_threshold_mm": 250.0,
+  "confirm_frames": 5,
+  "confirm_hits": 3,
+  "planner_model": "vertical_probe_sector_waypoints_v2",
+  "planner_clearance_mm": 25.0,
+  "sweep_profile": {
+    "theta_min_deg": 5.0,
+    "theta_max_deg": 175.0,
+    "r_mm": 112.0,
+    "z_mm": 20.0,
+    "step_deg": 1.5,
+    "dwell_s": 0.8
+  },
+  "imu_lpf_alpha": 0.25,
+  "imu_calibrated": true,
+  "imu_calibration_rms_deg": 5.126237987254511,
+  "imu_rot_wrist_from_imu": [
+    [
+      -0.14562898183538267,
+      -0.989218075683391,
+      -0.015485425110046878
+    ],
+    [
+      -0.2837998626134204,
+      0.026775244495773554,
+      0.9585096370213474
+    ],
+    [
+      -0.9477604326148005,
+      0.14398154403756297,
+      -0.2846392055679713
+    ]
+  ],
+  "urdf_path": "C:\\Users\\Sebastian\\Documents\\GitHub\\CSTONE_TESTGROUND\\Tinkerkit_model\\tinkerkit_with_tof.urdf"
+}

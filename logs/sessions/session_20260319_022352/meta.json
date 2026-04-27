@@ -1,0 +1,113 @@
+{
+  "start_wall": 1773901425.9888177,
+  "end_wall": 1773901432.2597425,
+  "duration_s": 6.270924806594849,
+  "samples": 152,
+  "tof_channels_enabled": 4,
+  "hyperion_mode": true,
+  "sensor_layout_mode": "hyperion_4tof",
+  "tof_grid_shapes": [
+    [
+      4,
+      4
+    ],
+    [
+      4,
+      4
+    ],
+    [
+      4,
+      4
+    ],
+    [
+      4,
+      4
+    ]
+  ],
+  "threshold_mm": 200.0,
+  "threshold_by_ch_mm": [
+    200.0,
+    200.0,
+    50.0,
+    50.0
+  ],
+  "obstacle_decay_s": 5.0,
+  "track_gate_mm": 90.0,
+  "track_confirm_hits": 2,
+  "track_max_misses": 5,
+  "planner_model": "simple_polar_pockets_committed",
+  "sensor_mount_source": "urdf_fixed_tof_links_only",
+  "sensor_mount_reference_home_topdown": {
+    "tof_ch0": [
+      0.0,
+      -1.0,
+      0.0
+    ],
+    "tof_ch1": [
+      0.0,
+      1.0,
+      0.0
+    ],
+    "tof_ch2": [
+      -1.0,
+      0.0,
+      0.0
+    ],
+    "tof_ch3": [
+      1.0,
+      0.0,
+      0.0
+    ]
+  },
+  "planner_clearance_mm": 10.0,
+  "link_segment_radius_mm": [
+    22.0,
+    18.0,
+    16.0,
+    14.0,
+    12.0
+  ],
+  "imu_lpf_alpha": 0.25,
+  "imu_calibrated": true,
+  "imu_calibration_rms_deg": 77.04983073905062,
+  "imu_rot_wrist_from_imu": [
+    [
+      0.0,
+      0.8944271909999159,
+      0.4472135954999578
+    ],
+    [
+      -0.8944271909999159,
+      0.20000000000000007,
+      -0.39999999999999986
+    ],
+    [
+      -0.4472135954999578,
+      -0.39999999999999986,
+      0.8
+    ]
+  ],
+  "feasible_region_dir": "C:\\Users\\Sebastian\\Documents\\GitHub\\CSTONE_TESTGROUND\\braccio_main_runner\\sensing\\feasible_regions",
+  "feasible_cloud_path": "C:\\Users\\Sebastian\\Documents\\GitHub\\CSTONE_TESTGROUND\\braccio_main_runner\\sensing\\feasible_regions\\workspace_cloud.npy",
+  "urdf_path": "C:\\Users\\Sebastian\\Documents\\GitHub\\CSTONE_TESTGROUND\\Tinkerkit_model\\tinkerkit_with_tof.urdf",
+  "baseline_map_valid": false,
+  "baseline_cell_count": 0,
+  "baseline_path": "C:\\Users\\Sebastian\\Documents\\GitHub\\CSTONE_TESTGROUND\\logs\\baselines\\hyperion_baseline.json",
+  "startup_scan_state": "idle",
+  "last_baseline_scan_ms": 0.0,
+  "baseline_points_accepted": 0,
+  "baseline_points_masked": 0,
+  "baseline_points_rejected": 0,
+  "baseline_known_static_count": 0,
+  "baseline_novel_delta_count": 0,
+  "scan_requested_count": 0,
+  "scan_ignored_count": 0,
+  "scan_completed_count": 0,
+  "scan_aborted_count": 0,
+  "support_only_prevented_count": 2,
+  "blank_replan_prevented_count": 0,
+  "hold_to_backstep_count": 13,
+  "global_plan_id": 1,
+  "global_plan_progress": 1.0,
+  "global_plan_paused": true
+}
